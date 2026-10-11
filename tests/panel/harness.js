@@ -51,10 +51,10 @@ const fakeUxp = {
 
 const LUMETRI_MODE = process.env.LUMETRI_MODE || "accept";
 const transactions = [];
-function makeParam(name, kind) {
-  const p = { displayName: name, value: kind === "string" ? "" : 0 };
+function makeParam(name, kind, dflt = kind === "string" ? "" : 0) {
+  const p = { displayName: name, value: dflt, dflt };
   p.createKeyframe = (v) => {
-    if (kind === "string" && LUMETRI_MODE !== "accept") throw new Error("incompatible value");
+    if (kind === "string" && LUMETRI_MODE === "reject") throw new Error("incompatible value");
     if (typeof v !== (kind === "string" ? "string" : "number")) throw new Error("incompatible value");
     return { value: { value: v } };
   };
@@ -63,7 +63,7 @@ function makeParam(name, kind) {
   return p;
 }
 function makeLumetri() {
-  const params = [makeParam("Exposure", "number"), makeParam("Input LUT", "number"), makeParam("Look", "string"), makeParam("Saturation", "number")];
+  const params = [makeParam("Exposure", "number"), makeParam("Input LUT", "number"), makeParam("Look", "string"), makeParam("Temperature", "number"), makeParam("Tint", "number"), makeParam("Contrast", "number"), makeParam("Saturation", "number", 100)];
   return { matchName: "AE.ADBE Lumetri", params, getParamCount: () => params.length, getParam: (i) => params[i], getMatchName: async () => "AE.ADBE Lumetri" };
 }
 function makeChain(list) {
@@ -116,11 +116,28 @@ const fakePpro = {
   VideoClipTrackItem,
   Project: { async getActiveProject() { return fakeProject; } },
   Constants: { TrackItemType: { CLIP: 1 } },
+  TickTime: { createWithSeconds: (s) => new TickTime(s) },
+  Exporter: {
+    // Renders a fake BMP whose pixels depend on what Lumetri would visibly do.
+    async exportSequenceFrame(seq, t, name, dir) {
+      const it = items.find((x) => t.seconds >= x.start && t.seconds <= x.start + (x.outP - x.inP));
+      const visible = it.components.filter((c) => c.matchName === "AE.ADBE Lumetri").map((c) => c.params
+        .filter((p) => p.value !== p.dflt && (p.displayName === "Look" ? LUMETRI_MODE === "accept" : typeof p.value === "number"))
+        .map((p) => p.value)).flat();
+      const seed = JSON.stringify([it.name, visible]);
+      const px = Buffer.alloc(192 * 108 * 3);
+      let h = 0;
+      for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+      for (let i = 0; i < px.length; i++) { h = (h * 1103515245 + 12345) >>> 0; px[i] = h >>> 24; }
+      const header = Buffer.alloc(54); header.write("BM"); header.writeUInt32LE(54, 10);
+      nfs.writeFileSync(path.join(dir, name), Buffer.concat([header, px]));
+      return true;
+    },
+  },
   ClipProjectItem: { cast: (pi) => ({
     async isSequence() { return false; }, async isOffline() { return false; },
     async getMediaFilePath() { return pi.file; }, async getInputLUTID() { return LUT_IDS[path.basename(pi.file)] ?? ""; } }) },
   VideoFilterFactory: { async getMatchNames() { return ["AE.ADBE Lumetri"]; }, async createComponent() { return makeLumetri(); } },
-  Exporter: { exportSequenceFrame() {} },
 };
 
 const claudeCalls = [];
@@ -206,12 +223,21 @@ async function fakeFetch(url, init = {}) {
   console.log("claude calls:", claudeCalls.length, "images:", claudeCalls[0] && claudeCalls[0].messages[0].content.filter((c) => c.type === "image").length);
 
   // 5. Apply all LUTs to the timeline (beta path).
-  await click("btn-apply-all-wrap", 600);
+  await click("btn-apply-all-wrap", 100);
+  for (let i = 0; i < 300 && !/Applied|Couldn't apply/.test(text("banner-text")); i++) await sleep(200);
+  if (!/Applied|Couldn't apply/.test(text("banner-text"))) done(1, "apply never finished\n" + $("log").textContent.slice(0, 3000));
   const lumetris = items.map((it) => it.components.filter((c) => c.matchName === "AE.ADBE Lumetri"));
   const looks = lumetris.map((l) => (l[0] ? path.basename(l[0].params[2].value || "") : "-"));
   console.log("mode:", LUMETRI_MODE, "| transactions:", transactions.length, "| Look per clip:", looks.join(", "));
   console.log("banner:", text("banner-text").slice(0, 120));
-  if (LUMETRI_MODE === "accept") {
+  if (LUMETRI_MODE === "ignore") {
+    // Path is stored but has no visible effect -> panel must fall back to sliders.
+    const methods = items.map((it) => it.components.filter((c) => c.matchName === "AE.ADBE Lumetri").length);
+    const sliderSet = items.filter((it) => it.components.some((c) => c.matchName === "AE.ADBE Lumetri" && c.params[0].value !== 0));
+    console.log("lumetri per clip:", methods.join(","), "| clips graded with sliders:", sliderSet.map((x) => x.name).join(","));
+    if (methods.some((m) => m > 1)) done(1, "left extra Lumetri instances behind");
+    if (!/sliders/.test(text("banner-text"))) done(1, "expected slider fallback banner: " + text("banner-text"));
+  } else if (LUMETRI_MODE === "accept") {
     if (looks.filter((l) => l === "grade.cube").length !== 3) done(1, "expected 3 clips with the LUT applied");
     // Each clip must carry its own shot's LUT (shot ids follow timeline order).
     const byStart = [...items].sort((x, y) => x.start - y.start);
@@ -222,11 +248,11 @@ async function fakeFetch(url, init = {}) {
       if (path.basename(path.dirname(l.params[2].value)) !== expected) done(1, `${it.name} got ${l.params[2].value}, expected ${expected}`);
     }
     console.log("each clip has its own shot's LUT: ok");
-    if (!/Applied 3 LUTs/.test(text("banner-text"))) done(1, "missing success banner");
+    if (!/Applied 3 shots/.test(text("banner-text")) || !/Lumetri Look/.test(text("banner-text"))) done(1, "missing success banner: " + text("banner-text"));
   } else {
-    if (lumetris.some((l) => l.length)) done(1, "rollback failed: Lumetri left on a clip");
-    if (!/nothing was changed/.test(text("banner-text"))) done(1, "missing fallback banner");
-    if (!/Lumetri params/.test($("log").textContent)) done(1, "params not logged for diagnosis");
+    // Look path refused -> Input LUT refused -> sliders applied (only one Lumetri per graded clip).
+    if (lumetris.some((l) => l.length > 1)) done(1, "rollback failed: extra Lumetri left on a clip");
+    if (!/sliders/.test(text("banner-text"))) done(1, "expected slider fallback: " + text("banner-text"));
   }
 
   // 6. Copy a LUT path, approve a shot, open the report.

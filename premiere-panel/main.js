@@ -744,66 +744,206 @@ async function lumetriParams(component) {
   return out;
 }
 
-async function applyLutToShot(shot) {
-  const { project, item } = await findTrackItem(shot.clip_id);
+// ---- verification: did the picture actually change?
+async function snapshot(sequence, item, tag) {
+  try {
+    if (typeof ppro.Exporter?.exportSequenceFrame !== "function") return null;
+    const dir = `${CG}/verify`;
+    await fs.mkdir(dir, { recursive: true });
+    const a = (await item.getStartTime()).seconds, b = (await item.getEndTime()).seconds;
+    const t = ppro.TickTime.createWithSeconds(a + (b - a) * 0.5);
+    const name = `${tag}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.bmp`;
+    await ppro.Exporter.exportSequenceFrame(sequence, t, name, dir, 192, 108);
+    const file = `${dir}/${name}`;
+    for (let i = 0; i < 40 && !(await exists(file)); i++) await sleep(150);
+    if (!(await exists(file))) return null;
+    await sleep(150); // let the writer finish
+    const bytes = new Uint8Array(await fs.readFile(file));
+    try { await fs.unlink(file); } catch (e) { /* keep */ }
+    const offset = bytes.length > 14 ? bytes[10] | (bytes[11] << 8) | (bytes[12] << 16) | (bytes[13] << 24) : 0;
+    return bytes.slice(offset);
+  } catch (e) {
+    diag(`snapshot failed: ${e.message}`);
+    return null;
+  }
+}
+function pixelDiff(a, b) {
+  if (!a || !b) return null;
+  const n = Math.min(a.length, b.length);
+  if (!n) return null;
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / n;
+}
+
+// ---- Lumetri helpers
+async function addLumetri(project, item) {
   const names = await ppro.VideoFilterFactory.getMatchNames();
   const lumetri = names.find((n) => /lumetri/i.test(n));
   if (!lumetri) throw new Error("Lumetri Color isn't available in this Premiere");
-
   const chain = await item.getComponentChain();
   const component = await ppro.VideoFilterFactory.createComponent(lumetri);
-  if (!runTransaction(project, [chain.createAppendComponentAction(component)], "Consistent Grade: add Lumetri")) {
+  if (!runTransaction(project, [chain.createAppendComponentAction(component)], "Consistent Grade: add Lumetri Color")) {
     throw new Error("Premiere refused to add Lumetri Color");
   }
-  // The appended instance is the last component in the chain.
   const fresh = await item.getComponentChain();
-  const added = fresh.getComponentAtIndex(fresh.getComponentCount() - 1);
-  const params = await lumetriParams(added);
-  const candidates = params.filter((p) => LUT_PARAM.test(p.name || ""));
-  // Prefer the Creative "Look" over the Basic "Input LUT" (the LUT expects Rec.709 in).
-  candidates.sort((a, b) => (/look/i.test(b.name) ? 1 : 0) - (/look/i.test(a.name) ? 1 : 0));
-
-  for (const c of candidates) {
-    let keyframe;
-    try { keyframe = c.param.createKeyframe(shot.grade_cube); } catch (e) { continue; } // not a path-type parameter
+  return fresh.getComponentAtIndex(fresh.getComponentCount() - 1);
+}
+async function removeComponent(project, item, component) {
+  try {
+    const chain = await item.getComponentChain();
+    runTransaction(project, [chain.createRemoveComponentAction(component)], "Consistent Grade: remove Lumetri Color");
+  } catch (e) { diag(`remove failed: ${e.message}`); }
+}
+function setParams(project, pairs, label) {
+  const actions = [];
+  for (const [param, value] of pairs) {
     try {
-      if (!runTransaction(project, [c.param.createSetValueAction(keyframe, true)], "Consistent Grade: apply LUT")) continue;
-    } catch (e) { continue; }
-    let readBack = null;
-    try { readBack = (await c.param.getStartValue()).value.value; } catch (e) { /* ignore */ }
-    if (String(readBack || "").includes(basename(shot.grade_cube))) {
-      log(`${shot.name}: LUT set on Lumetri "${c.name}" (param ${c.index})`);
-      return { ok: true, param: c.name };
+      if (typeof param.createSetTimeVaryingAction === "function" && param.areKeyframesSupported) {
+        // keep values static (no keyframes) when the API offers it
+      }
+      actions.push(param.createSetValueAction(param.createKeyframe(value), true));
+    } catch (e) {
+      diag(`  "${param.displayName}" rejected ${JSON.stringify(value)}: ${e.message}`);
     }
   }
-  // Didn't stick: remove the Lumetri we added so the clip is exactly as before.
-  try { runTransaction(project, [fresh.createRemoveComponentAction(added)], "Consistent Grade: remove Lumetri"); } catch (e) { /* leave it */ }
-  log(`${shot.name}: couldn't set a LUT path. Lumetri params:\n` +
-      params.map((p) => `${p.index}\t${p.name}\t${JSON.stringify(p.value)}`).join("\n"));
+  if (!actions.length) return false;
+  return runTransaction(project, actions, label);
+}
+const findParam = (params, re, not) => params.find((p) => re.test(p.name || "") && !(not && not.test(p.name || "")));
+
+// Approximate the shot's match grade with Lumetri Basic Correction sliders.
+function sliderValues(shot) {
+  const g = shot.grade;
+  const tt = tempTint(g);
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  return {
+    Exposure: clamp(g.exposure_ev, -4, 4),
+    Temperature: clamp(tt.temp * 1.5, -100, 100),
+    Tint: clamp(tt.tint * 1.5, -100, 100),
+    Contrast: clamp((g.contrast - 1) * 100, -100, 100),
+    Saturation: clamp(100 * g.saturation, 0, 200),
+  };
+}
+function isIdentity(shot) {
+  const v = sliderValues(shot);
+  return Math.abs(v.Exposure) < 0.02 && Math.abs(v.Temperature) < 0.5 && Math.abs(v.Tint) < 0.5 &&
+    Math.abs(v.Contrast) < 0.5 && Math.abs(v.Saturation - 100) < 0.5;
+}
+
+const METHOD_LABEL = { look: "LUT in Lumetri Look", input: "LUT in Lumetri Input LUT", sliders: "Lumetri sliders (approx.)", none: "nothing to change" };
+
+async function applyLutToShot(shot) {
+  const { project, item } = await findTrackItem(shot.clip_id);
+  const sequence = await project.getActiveSequence();
+  diag(`— ${shot.name} (${shot.shot_id}) · ${shot.grade_cube}`);
+  const before = await snapshot(sequence, item, "before");
+  // A second baseline tells us how much Premiere's own rendering varies frame to frame.
+  const before2 = before ? await snapshot(sequence, item, "before2") : null;
+  const noise = pixelDiff(before, before2) || 0;
+  const threshold = Math.max(0.02, noise * 3 + 0.02);
+  diag(`  baseline frame: ${before ? `${before.length} bytes, render noise ${noise.toFixed(3)}, threshold ${threshold.toFixed(3)}` : "unavailable (can't verify visually)"}`);
+
+  const attempts = [
+    { method: "look", run: async (params) => { const p = findParam(params, /look/i); return p ? [[p.param, shot.grade_cube]] : null; } },
+    { method: "input", run: async (params) => { const p = findParam(params, /input\s*lut/i); return p ? [[p.param, shot.grade_cube]] : null; } },
+    { method: "sliders", run: async (params) => {
+      const vals = sliderValues(shot);
+      const pairs = [];
+      for (const [name, value] of Object.entries(vals)) {
+        const p = params.find((x) => (x.name || "").trim().toLowerCase() === name.toLowerCase());
+        if (p) pairs.push([p.param, value]);
+        else diag(`  no Lumetri param named "${name}"`);
+      }
+      return pairs.length ? pairs : null;
+    } },
+  ];
+
+  let paramDump = null;
+  // Without a test frame we can't tell whether a LUT path really renders (Premiere
+  // may store it and ignore it), so go straight to sliders, which always render.
+  const usable = before ? attempts : attempts.filter((x) => x.method === "sliders");
+  if (!before) diag("  no test frame: skipping LUT-path methods, using Lumetri sliders");
+  for (const attempt of usable) {
+    if (attempt.method === "sliders" && isIdentity(shot)) {
+      diag("  sliders: grade is (near) identity, nothing to set");
+      continue;
+    }
+    const component = await addLumetri(project, item);
+    const params = await lumetriParams(component);
+    if (!paramDump) paramDump = params.map((p) => `${p.index}\t${p.name}\t${JSON.stringify(p.value)}`).join("\n");
+    const pairs = await attempt.run(params);
+    if (!pairs) {
+      diag(`  ${attempt.method}: no matching Lumetri parameter`);
+      await removeComponent(project, item, component);
+      continue;
+    }
+    const ok = setParams(project, pairs, `Consistent Grade: ${METHOD_LABEL[attempt.method]}`);
+    const readBack = [];
+    for (const [param] of pairs) {
+      try { readBack.push(JSON.stringify((await param.getStartValue()).value.value)); } catch (e) { readBack.push("?"); }
+    }
+    await sleep(250);
+    const after = await snapshot(sequence, item, "after");
+    const d = pixelDiff(before, after);
+    diag(`  ${attempt.method}: set=${ok} readBack=${readBack.join(",")} pixelDiff=${d == null ? "n/a" : d.toFixed(2)}`);
+    const changed = d == null ? ok : d > threshold;
+    if (ok && changed) {
+      return { ok: true, method: attempt.method, verified: d != null };
+    }
+    await removeComponent(project, item, component);
+  }
+  if (isIdentity(shot) && shot.is_reference) return { ok: true, method: "none", verified: true };
+  diag(`  Lumetri params:\n${paramDump || "(none read)"}`);
   return { ok: false };
 }
 
 async function applyShots(shots) {
-  const done = [], failed = [];
+  const results = [];
   for (const shot of shots) {
     try {
       const r = await applyLutToShot(shot);
-      (r.ok ? done : failed).push(shot);
-      if (r.ok) state.applied[shot.shot_id] = true;
+      results.push({ shot, ...r });
+      if (r.ok) state.applied[shot.shot_id] = r.method;
     } catch (e) {
-      failed.push(shot);
-      log(`${shot.name}: ${e.message}`);
+      results.push({ shot, ok: false });
+      diag(`${shot.name}: ${e.message}`);
     }
   }
   renderResults();
-  if (!failed.length) {
-    banner(`Applied ${done.length} LUT${done.length === 1 ? "" : "s"} — each added as a new Lumetri Color. Press ⌘Z to undo.`, "ok");
-  } else if (done.length) {
-    banner(`Applied ${done.length}, couldn't apply ${failed.length} (${failed.map((x) => esc(x.name)).join(", ")}). Use Copy LUT for those.`, "warn", 0);
-  } else {
-    await navigator.clipboard.setContent({ "text/plain": failed[0].grade_cube });
-    banner("This Premiere version didn't accept the LUT path, so nothing was changed. The path is copied — apply it in Lumetri › Creative › Look › Browse… (⌘⇧G, paste). Please send the Activity log from Setup so this can be fixed.", "warn", 0);
+  const good = results.filter((r) => r.ok);
+  const bad = results.filter((r) => !r.ok);
+  const approx = good.filter((r) => r.method === "sliders").length;
+  const unverified = good.filter((r) => !r.verified).length;
+  let msg = good.length ? `Applied ${good.length} shot${good.length === 1 ? "" : "s"}: ` +
+    good.map((r) => `${esc(r.shot.name)} → ${METHOD_LABEL[r.method]}`).join("; ") + "." : "";
+  if (approx) {
+    msg += " Slider grades approximate the match — fine-tune in Lumetri › Basic Correction if needed.";
+    if (state.summary.look && state.summary.look !== "none") msg += " The shared look isn't in the sliders: put <b>look.cube</b> (Copy look-only LUT) on an adjustment layer.";
   }
+  if (unverified) msg += " Couldn't export a test frame to confirm — please check the picture.";
+  if (bad.length) {
+    await navigator.clipboard.setContent({ "text/plain": bad[0].shot.grade_cube });
+    msg += ` ${bad.length ? `Couldn't apply ${bad.map((r) => esc(r.shot.name)).join(", ")} — nothing was changed on ${bad.length === 1 ? "it" : "them"}; the LUT path is copied for manual use. ` : ""}` +
+      'Please tap <span class="link" id="banner-diag">Copy diagnostics</span> and send it over.';
+  }
+  msg += " To undo, delete the added Lumetri Color in Effect Controls.";
+  banner(msg, bad.length ? "warn" : "ok", 0);
+  const link = $("banner-diag");
+  if (link) link.addEventListener("click", guard(copyDiagnostics));
+}
+
+const diagLines = [];
+function diag(line) {
+  diagLines.push(line);
+  log(line);
+}
+async function copyDiagnostics() {
+  let host = "";
+  try { host = `${uxp.host.name} ${uxp.host.version}`; } catch (e) { host = "unknown host"; }
+  const text = [`Consistent Grade diagnostics · ${host} · ${new Date().toISOString()}`, ...diagLines].join("\n");
+  await navigator.clipboard.setContent({ "text/plain": text });
+  banner("Diagnostics copied — paste them into the chat.", "ok");
 }
 
 // ------------------------------------------------------------------ diagnostics
@@ -922,6 +1062,7 @@ $("btn-folder").addEventListener("click", guard(async () => {
   await uxp.shell.openPath(state.summary.folder, "Shows this job's LUTs and previews in Finder");
 }));
 $("btn-probe").addEventListener("click", guard(capabilityTest));
+$("btn-diag").addEventListener("click", guard(copyDiagnostics));
 $("btn-lumetri").addEventListener("click", guard(inspectLumetri));
 $("btn-log").addEventListener("click", () => {
   const hidden = $("log").classList.contains("hidden");
