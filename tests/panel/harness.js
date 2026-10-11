@@ -68,7 +68,10 @@ const items = [
   new VideoClipTrackItem("ref", `${FOOTAGE}/a_reference.mp4`, 0, 2.5, 10),
   new VideoClipTrackItem("dark", `${FOOTAGE}/b_dark_green.mp4`, 0.2, 2.8, 0),
   new VideoClipTrackItem("fast", `${FOOTAGE}/c_warm_flat.mp4`, 0, 2, 20, 2.0),
+  new VideoClipTrackItem("lut", `${FOOTAGE}/e_untagged.mp4`, 0, 2.5, 30),
 ];
+// What Premiere reports for each clip's Input LUT: placeholder, empty, or a real id.
+const LUT_IDS = { "a_reference.mp4": "00000000-0000-0000-0000-000000000000", "b_dark_green.mp4": "", "e_untagged.mp4": "6f1c2a9e-4b7d-4e2a-9c1f-1a2b3c4d5e6f" };
 const sequence = {
   async getSelection() { return { async getTrackItems() { return items; } }; },
   async getSettings() { return { getVideoFrameRate: () => ({ value: 24 }) }; },
@@ -79,7 +82,7 @@ const fakePpro = {
   Project: { async getActiveProject() { return { async getActiveSequence() { return sequence; } }; } },
   ClipProjectItem: { cast: (pi) => ({
     async isSequence() { return false; }, async isOffline() { return false; },
-    async getMediaFilePath() { return pi.file; }, async getInputLUTID() { return ""; } }) },
+    async getMediaFilePath() { return pi.file; }, async getInputLUTID() { return LUT_IDS[path.basename(pi.file)] ?? ""; } }) },
   VideoFilterFactory: { async getMatchNames() { return ["AE.ADBE Lumetri"]; } },
   Exporter: { exportSequenceFrame() {} },
 };
@@ -144,7 +147,13 @@ async function fakeFetch(url, init = {}) {
   await click(document.querySelector('.clip[data-shot="shot_002"]'));   // "ref" sits at 10s -> shot_002
   if (!document.querySelector('.clip[data-shot="shot_002"]').classList.contains("ref")) done(1, "reference not set");
   await click(document.querySelector('.clip[data-shot="shot_003"]'));   // speed-changed: refused
-  if (!/can't be the reference/.test(text("banner-text"))) done(1, "flagged clip accepted as reference");
+  if (!/can't be used/.test(text("banner-text"))) done(1, "flagged clip accepted as reference");
+  // The clip with a real Input LUT id is flagged; include it anyway (it is also untagged -> Rec.709 assumption).
+  const lutTag = document.querySelector('.clip[data-shot="shot_004"] [data-include]');
+  if (!lutTag || !/include\?/.test(lutTag.textContent)) done(1, "real input LUT not flagged as includable");
+  if (document.querySelector('.clip[data-shot="shot_002"] .tag').textContent !== "REF") done(1, "placeholder LUT id wrongly flagged");
+  await click(lutTag);
+  console.log("after include:", [...document.querySelectorAll(".clip")].map((c) => c.querySelector(".tag").textContent).join(", "));
   await click("claude-row");
   await click(document.querySelector('[data-look="ai"]'));
   console.log("cta:", text("cta-main"), "|", text("cta-sub"));
@@ -155,6 +164,7 @@ async function fakeFetch(url, init = {}) {
   failIfBanner();
   if (!visible("results")) done(1, "no results\n" + $("log").textContent);
   console.log("hero:", text("hero-num"), text("hero-big"), "|", text("hero-sub"));
+  if (text("stat-ok") === "0" && text("stat-review") === "0") done(1, "nothing matched");
   console.log("stats: matched", text("stat-ok"), "review", text("stat-review"), "skipped", text("stat-skip"));
   console.log("shot cards:", document.querySelectorAll("#shot-cards .card").length, "| ev rows:", document.querySelectorAll("#ev-rows .ev-row").length);
   console.log("claude calls:", claudeCalls.length, "images:", claudeCalls[0] && claudeCalls[0].messages[0].content.filter((c) => c.type === "image").length);

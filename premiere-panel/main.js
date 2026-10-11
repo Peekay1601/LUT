@@ -40,6 +40,8 @@ const state = {
   manifest: null,
   reference: null,        // shot_id chosen by clicking a clip
   referenceImage: null,   // path to a still
+  included: {},           // shot_id -> true when the user overrides a "soft" flag
+  assumeRec709: true,     // treat files without colour tags as Rec.709
   look: "none",
   claude: false,
   apiKey: null,
@@ -127,6 +129,7 @@ function renderChrome() {
   $("key-tag").textContent = state.apiKey ? "SAVED" : "NOT SET";
   $("key-tag").className = `tag ${state.apiKey ? "ok" : ""}`;
 
+  $("rec709-toggle").className = `toggle ${state.assumeRec709 ? "on ok" : ""}`;
   $("claude-toggle").className = `toggle ${state.claude ? "on" : ""} ${state.apiKey ? "" : "is-disabled"}`;
   show("claude-needs-key", !state.apiKey);
   renderCta();
@@ -257,6 +260,7 @@ async function readSelection() {
   const items = await (await sequence.getSelection()).getTrackItems();
   const fps = (await sequence.getSettings()).getVideoFrameRate().value;
   const clips = [];
+  const inputLutIds = [];
   for (const item of items) {
     if (!(item instanceof ppro.VideoClipTrackItem)) continue;
     const flags = [];
@@ -266,7 +270,10 @@ async function readSelection() {
       if (await clipItem.isSequence()) flags.push("nested_sequence");
       if (await clipItem.isOffline()) flags.push("offline");
       sourcePath = await clipItem.getMediaFilePath();
-      try { if (await clipItem.getInputLUTID()) flags.push("input_lut"); } catch (e) { /* n/a */ }
+      let lutId = "";
+      try { lutId = String((await clipItem.getInputLUTID()) ?? ""); } catch (e) { /* n/a */ }
+      if (hasRealInputLut(lutId)) flags.push("input_lut");
+      inputLutIds.push(`${await item.getName()}: "${lutId}"`);
     }
     if (!sourcePath) flags.push("missing_media");
     const speed = await item.getSpeed();
@@ -295,6 +302,7 @@ async function readSelection() {
   }
   clips.sort((a, b) => a.timeline_in - b.timeline_in || a.track_index - b.track_index);
   clips.forEach((c, i) => (c.shot_id = `shot_${String(i + 1).padStart(3, "0")}`));
+  if (inputLutIds.length) log(`Input LUT ids reported by Premiere — ${inputLutIds.join(", ")}`);
   return {
     version: 1, source: "premiere-uxp",
     grading_basis: "clean source media (effects and colour transforms applied in Premiere are NOT seen)",
@@ -308,7 +316,21 @@ const FLAG_LABELS = {
   missing_media: "No media", input_lut: "Input LUT", existing_grade: "Has Lumetri", disabled: "Disabled",
 };
 const BLOCKING = new Set(["speed_change", "reversed", "nested_sequence", "offline", "missing_media", "input_lut", "existing_grade"]);
-const usable = (c) => !(c.flags || []).some((f) => BLOCKING.has(f));
+// Flags based on what Premiere reports about colour settings. They can be wrong
+// (or harmless for your footage), so the user may include such clips anyway.
+const SOFT = new Set(["input_lut", "existing_grade"]);
+const blockingFlags = (c) => (c.flags || []).filter((f) => BLOCKING.has(f) && !(SOFT.has(f) && state.included[c.shot_id]));
+const usable = (c) => blockingFlags(c).length === 0;
+const softOnly = (c) => (c.flags || []).filter((f) => BLOCKING.has(f)).every((f) => SOFT.has(f));
+
+// Premiere may report a placeholder ID when no Input LUT is set; only a real ID counts.
+function hasRealInputLut(id) {
+  const v = String(id || "").trim();
+  if (!v) return false;
+  if (/^(none|null|undefined|0|false)$/i.test(v)) return false;
+  if (/^[0\-{}\s]+$/.test(v)) return false; // all-zero GUID
+  return true;
+}
 
 function renderClips() {
   const m = state.manifest;
@@ -328,9 +350,12 @@ function renderClips() {
   $("clips").innerHTML = m.clips.map((c, i) => {
     const isRef = state.reference === c.shot_id && !state.referenceImage;
     const ok = usable(c);
+    const flagged = (c.flags || []).find((f) => BLOCKING.has(f));
     const tag = isRef ? '<div class="tag ref">REF</div>'
+      : ok && state.included[c.shot_id] ? `<div class="tag warn" data-include="${esc(c.shot_id)}" title="Click to skip this clip again">INCLUDED</div>`
       : ok ? '<div class="tag ok">READY</div>'
-      : `<div class="tag warn">${esc(FLAG_LABELS[(c.flags || []).find((f) => BLOCKING.has(f))] || "Skipped")}</div>`;
+      : softOnly(c) ? `<div class="tag warn" data-include="${esc(c.shot_id)}" title="Click to include this clip anyway">${esc(FLAG_LABELS[flagged])} · include?</div>`
+      : `<div class="tag warn">${esc(FLAG_LABELS[flagged] || "Skipped")}</div>`;
     const dur = c.source_out - c.source_in;
     return `<div class="clip ${isRef ? "ref" : ""} ${ok ? "" : "skip"}" data-shot="${esc(c.shot_id)}">
       <div class="clip-idx">${String(i + 1).padStart(2, "0")}</div>
@@ -341,9 +366,26 @@ function renderClips() {
       ${tag}
     </div>`;
   }).join("");
+  document.querySelectorAll("[data-include]").forEach((el) => el.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const id = el.dataset.include;
+    state.included[id] = !state.included[id];
+    if (!state.included[id] && state.reference === id) state.reference = null;
+    if (state.included[id]) {
+      const c = state.manifest.clips.find((x) => x.shot_id === id);
+      banner(c.flags.includes("input_lut")
+        ? `Including ${esc(c.name)}. If this clip really has an Input LUT in Premiere, the LUT we build will be based on the clip <i>without</i> it.`
+        : `Including ${esc(c.name)}. Its existing Lumetri grade isn't seen by the analysis — remove it before applying our LUT.`, "warn", 9000);
+    }
+    renderClips();
+  }));
   document.querySelectorAll(".clip").forEach((el) => el.addEventListener("click", () => {
     const c = state.manifest.clips.find((x) => x.shot_id === el.dataset.shot);
-    if (!usable(c)) return banner(`${esc(c.name)} can't be the reference — it's flagged “${esc(FLAG_LABELS[(c.flags || [])[0]] || "unsupported")}”.`, "warn");
+    if (!usable(c)) {
+      return banner(softOnly(c)
+        ? `${esc(c.name)} is flagged “${esc(FLAG_LABELS[blockingFlags(c)[0]])}”. Click its tag to include it anyway.`
+        : `${esc(c.name)} can't be used — it's flagged “${esc(FLAG_LABELS[blockingFlags(c)[0]] || "unsupported")}”.`, "warn");
+    }
     state.reference = state.reference === c.shot_id ? null : c.shot_id;
     state.referenceImage = null;
     renderRefImage();
@@ -353,7 +395,10 @@ function renderClips() {
   $("count-shots").textContent = String(n);
   show("count-shots", true);
   show("clips-hint", true);
-  $("clips-hint").textContent = state.reference || state.referenceImage
+  const softSkipped = m.clips.filter((c) => !usable(c) && softOnly(c)).length;
+  $("clips-hint").textContent = softSkipped && !n
+    ? "Every clip is flagged. If they don't really have an Input LUT or Lumetri grade, click “include?” on each."
+    : state.reference || state.referenceImage
     ? "Click the reference again to clear it."
     : "Click a shot to make it the reference (otherwise the most typical one is used).";
   renderCta();
@@ -437,8 +482,18 @@ async function analyze() {
   const dir = `${JOBS}/${id}`;
   await fs.mkdir(dir, { recursive: true });
   await writeJson(`${dir}/request.json`, {
-    manifest: state.manifest,
-    options: { reference: state.referenceImage || state.reference || null, look: state.look, ai_mode: state.claude ? "panel" : "off" },
+    manifest: {
+      ...state.manifest,
+      clips: state.manifest.clips.map((c) => (state.included[c.shot_id]
+        ? { ...c, flags: c.flags.filter((f) => !SOFT.has(f)), user_included: c.flags.filter((f) => SOFT.has(f)) }
+        : c)),
+    },
+    options: {
+      reference: state.referenceImage || state.reference || null,
+      look: state.look,
+      ai_mode: state.claude ? "panel" : "off",
+      assume_rec709: state.assumeRec709,
+    },
   });
   state.job = dir;
   state.running = true;
@@ -707,10 +762,13 @@ $("btn-key-test").addEventListener("click", guard(testKey));
 $("btn-key-forget").addEventListener("click", guard(forgetKey));
 $("btn-read").addEventListener("click", guard(async () => {
   state.manifest = await readSelection();
+  state.included = {};
   if (state.reference && !state.manifest.clips.some((c) => c.shot_id === state.reference)) state.reference = null;
   renderClips();
   const skipped = state.manifest.clips.filter((c) => !usable(c)).length;
-  if (skipped) banner(`${skipped} clip${skipped === 1 ? "" : "s"} will be skipped — speed changes, nesting, input LUTs and existing Lumetri grades aren't supported yet.`, "warn");
+  const soft = state.manifest.clips.filter((c) => !usable(c) && softOnly(c)).length;
+  if (soft) banner(`${soft} clip${soft === 1 ? " is" : "s are"} flagged for an Input LUT or Lumetri grade. If that's wrong, click “include?” on the clip.`, "warn", 0);
+  else if (skipped) banner(`${skipped} clip${skipped === 1 ? "" : "s"} will be skipped — speed changes, nesting and offline media aren't supported yet.`, "warn");
 }));
 $("btn-ref-image").addEventListener("click", guard(async () => {
   const f = await localFileSystem.getFileForOpening({ types: ["jpg", "jpeg", "png", "tif", "tiff"] });
@@ -728,6 +786,11 @@ $("claude-row").addEventListener("click", () => {
   renderLooks();
 });
 $("btn-analyze").addEventListener("click", guard(analyze));
+$("rec709-row").addEventListener("click", () => {
+  state.assumeRec709 = !state.assumeRec709;
+  try { localStorage.setItem("assumeRec709", state.assumeRec709 ? "1" : "0"); } catch (e) { /* optional */ }
+  renderChrome();
+});
 $("btn-cancel").addEventListener("click", guard(async () => {
   if (state.job) await fs.writeFile(`${state.job}/cancel`, "1", { encoding: "utf-8" });
   $("stage").textContent = "Cancelling…";
@@ -752,6 +815,7 @@ $("btn-log").addEventListener("click", () => {
 
 (async () => {
   $("kv-folder").textContent = CG.replace(HOME, "~");
+  try { if (localStorage.getItem("assumeRec709") === "0") state.assumeRec709 = false; } catch (e) { /* optional */ }
   renderClips();
   renderLooks();
   renderResults();

@@ -236,6 +236,7 @@ body {
 .toggle-knob { width: 13px; height: 13px; border-radius: 7px; background-color: var(--text-2); }
 .toggle.on { background-color: var(--claude); border-color: var(--claude); justify-content: flex-end; }
 .toggle.on .toggle-knob { background-color: #ffffff; }
+.toggle.on.ok { background-color: var(--ok); border-color: var(--ok); }
 .toggle.is-disabled { opacity: 0.4; }
 .toggle-text { flex: 1; margin-left: 10px; }
 .toggle-title { font-weight: 700; color: var(--text); }
