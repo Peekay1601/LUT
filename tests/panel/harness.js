@@ -103,6 +103,9 @@ async function fakeFetch(url, init = {}) {
 (async () => {
   const dom = new JSDOM(nfs.readFileSync(path.join(BUILD, "index.html"), "utf8").replace(/<script[^>]*><\/script>/, ""));
   const { window } = dom;
+  // jsdom has no canvas; give the panel a no-op 2D context.
+  const noop = new Proxy({}, { get: (t, k) => (k === "createRadialGradient" || k === "createLinearGradient" ? () => ({ addColorStop() {} }) : () => {}), set: () => true });
+  window.HTMLCanvasElement.prototype.getContext = () => noop;
   const document = window.document;
   const clip = [];
   const navigator = { clipboard: { async setContent(o) { clip.push(o["text/plain"]); } } };
@@ -112,48 +115,57 @@ async function fakeFetch(url, init = {}) {
   new Function("require", "document", "navigator", "fetch", "setInterval", src)(
     req, document, navigator, fakeFetch, (f, t) => intervals.push(setInterval(f, t)));
   const $ = (id) => document.getElementById(id);
-  const click = async (id, wait = 300) => { $(id).dispatchEvent(new window.Event("click")); await sleep(wait); };
-  const logText = () => $("log").textContent;
+  const click = async (el, wait = 300) => { (typeof el === "string" ? $(el) : el).dispatchEvent(new window.Event("click")); await sleep(wait); };
+  const text = (id) => $(id).textContent.replace(/\s+/g, " ").trim();
+  const visible = (id) => !$(id).classList.contains("hidden");
   const done = (code, msg) => { console.log(msg); intervals.forEach(clearInterval); if (worker) worker.kill(); process.exit(code); };
+  const failIfBanner = () => { if ($("banner").className.includes("bad") && visible("banner")) done(1, "error banner: " + text("banner-text") + "\n" + $("log").textContent); };
+  await sleep(300);
 
-  // 1. API key
+  // 1. API key: reject a bad key, accept and save a good one.
   $("api-key").value = "sk-ant-wrong-000000000000";
   await click("btn-key-test");
-  if (!/rejected/.test($("key-status").innerHTML)) done(1, "bad key not rejected: " + $("key-status").innerHTML);
+  if (!/rejected/.test(text("key-status"))) done(1, "bad key not rejected: " + text("key-status"));
   $("api-key").value = "sk-ant-test-key-1234567890";
   await click("btn-key-test");
   await click("btn-key-save");
-  if (!/Key saved securely/.test($("key-status").textContent)) done(1, "key not saved: " + $("key-status").textContent);
-  console.log("key:", $("key-status").textContent);
+  if (!/Saved key/.test(text("key-status")) || text("key-tag") !== "SAVED") done(1, "key not saved: " + text("key-status"));
+  console.log("key:", text("key-status"));
 
-  // 2. Engine
+  // 2. Engine: Start engine copies the engine, writes the script and runs it.
   await click("btn-engine", 100);
-  for (let i = 0; i < 60 && !/running/.test($("engine-status").textContent); i++) await sleep(500);
-  console.log("engine:", $("engine-status").textContent, "| opened:", opened.map((p) => path.basename(p)));
-  if (!/running/.test($("engine-status").textContent)) done(1, "engine did not start\n" + logText());
+  for (let i = 0; i < 60 && text("engine-title") !== "Running"; i++) await sleep(500);
+  if (text("engine-title") !== "Running") done(1, "engine did not start\n" + $("log").textContent);
+  console.log("engine:", text("kv-engine"), "| opened:", opened.map((p) => path.basename(p)));
 
-  // 3. Read clips, choose options, analyse with Claude
+  // 3. Read clips; click the reference; turn Claude on; let Claude pick the look.
   await click("btn-read");
-  console.log("clips:", $("clips").textContent.replace(/\s+/g, " ").trim());
-  $("ref-picker").value = "shot_002"; // timeline order: dark(0s), ref(10s), fast(20s) -> ref is shot_002
-  $("look-picker").value = "ai";
-  $("ai-allowed").checked = true;
-  $("btn-analyze").dispatchEvent(new window.Event("click"));
-  for (let i = 0; i < 240 && !$("results").innerHTML; i++) await sleep(500);
-  console.log("results:", $("results").textContent.replace(/\s+/g, " ").trim().slice(0, 700));
-  console.log("claude calls:", claudeCalls.length, "images:", claudeCalls[0] && claudeCalls[0].messages[0].content.filter((c) => c.type === "image").length);
-  if (!$("results").innerHTML) done(1, "no results\n" + logText());
+  console.log("clips:", [...document.querySelectorAll(".clip")].map((c) => c.querySelector(".clip-name").textContent + "=" + c.querySelector(".tag").textContent).join(", "));
+  await click(document.querySelector('.clip[data-shot="shot_002"]'));   // "ref" sits at 10s -> shot_002
+  if (!document.querySelector('.clip[data-shot="shot_002"]').classList.contains("ref")) done(1, "reference not set");
+  await click(document.querySelector('.clip[data-shot="shot_003"]'));   // speed-changed: refused
+  if (!/can't be the reference/.test(text("banner-text"))) done(1, "flagged clip accepted as reference");
+  await click("claude-row");
+  await click(document.querySelector('[data-look="ai"]'));
+  console.log("cta:", text("cta-main"), "|", text("cta-sub"));
 
-  // 4. Copy LUT path + approve
-  const copy = document.querySelector("[data-copy]");
-  copy.dispatchEvent(new window.Event("click"));
-  const cb = document.querySelector("[data-approve]");
-  cb.checked = true;
-  cb.dispatchEvent(new window.Event("change"));
-  await sleep(300);
-  console.log("clipboard:", clip[0]);
+  // 4. Analyse.
+  await click("btn-analyze", 100);
+  for (let i = 0; i < 240 && !visible("results"); i++) { await sleep(500); failIfBanner(); }
+  failIfBanner();
+  if (!visible("results")) done(1, "no results\n" + $("log").textContent);
+  console.log("hero:", text("hero-num"), text("hero-big"), "|", text("hero-sub"));
+  console.log("stats: matched", text("stat-ok"), "review", text("stat-review"), "skipped", text("stat-skip"));
+  console.log("shot cards:", document.querySelectorAll("#shot-cards .card").length, "| ev rows:", document.querySelectorAll("#ev-rows .ev-row").length);
+  console.log("claude calls:", claudeCalls.length, "images:", claudeCalls[0] && claudeCalls[0].messages[0].content.filter((c) => c.type === "image").length);
+
+  // 5. Copy a LUT path, approve a shot, open the report.
+  await click(document.querySelector("[data-copy]"));
+  await click(document.querySelector("[data-approve]"));
+  const approvals = JSON.parse(nfs.readFileSync(path.join(path.dirname(clip[0]), "..", "approvals.json"), "utf8"));
+  console.log("clipboard:", path.basename(path.dirname(clip[0])) + "/" + path.basename(clip[0]), "| approvals:", JSON.stringify(approvals));
   await click("btn-report");
   console.log("opened:", opened.map((p) => path.basename(p)));
-  console.log("errors in log:", (logText().match(/error:.*/g) || []).join(" | ") || "none");
+  console.log("errors in log:", ($("log").textContent.match(/error:.*/g) || []).join(" | ") || "none");
   done(0, "HARNESS OK");
 })().catch((e) => { console.error(e); if (worker) worker.kill(); process.exit(1); });

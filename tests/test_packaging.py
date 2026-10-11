@@ -22,7 +22,9 @@ def test_ccx_layout():
     assert ".command" in perms["launchProcess"]["extensions"]
     for icon in manifest["entrypoints"][0]["icons"]:
         assert icon["path"] in names and icon["path"].replace(".png", "@2x.png") in names
-    assert {"index.html", "main.js", "styles.css"} <= names
+    assert {"index.html", "main.js", "styles.css", "assets/mark.png"} <= names
+    for look in ("none", "natural_commercial", "warm_documentary", "muted_cinematic", "clean_product"):
+        assert f"assets/looks/{look}.png" in names
     assert all(f"engine/{f}" in names for f in files)
     assert "autograde/worker.py" in files and "autograde/service.py" not in files
     assert start.startswith("#!/bin/bash") and "autograde worker" in start

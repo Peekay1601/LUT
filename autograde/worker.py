@@ -95,22 +95,32 @@ class PanelProvider(ai.Provider):
 
 
 def _summary(project: dict, job_dir: Path) -> dict:
+    ref = project["reference"]
     return {
         "consistency": project["consistency"],
         "look": project["look"]["name"],
         "ai_look": (project.get("ai") or {}).get("look"),
-        "reference_preview": str(job_dir / project["reference"]["preview"]),
+        "reference": {"description": ref["description"], "shot_id": ref.get("shot_id"),
+                      "preview": str(job_dir / ref["preview"])},
+        "reference_preview": str(job_dir / ref["preview"]),
         "look_cube": str(job_dir / "look" / "look.cube"),
         "report": str(job_dir / "report.html"),
+        "folder": str(job_dir),
         "shots": [{
             "shot_id": s["shot_id"], "name": s["name"], "status": s["status"],
             "clip_id": s.get("premiere", {}).get("clip_id"),
+            "is_reference": s["shot_id"] == ref.get("shot_id"),
             "needs_review": (s.get("grade") or {}).get("needs_review"),
             "grade": s.get("grade"), "warnings": s["warnings"],
             "reasons": (s.get("grade") or {}).get("reasons", []),
+            "before": s.get("vs_reference"),
+            "after": s.get("after_vs_reference"),
+            "exposure_variation_ev": (s.get("measurements") or {}).get("exposure_variation_ev"),
             "grade_cube": str(job_dir / s["files"]["grade_cube"]) if s.get("files") else None,
             "match_cube": str(job_dir / s["files"]["match_cube"]) if s.get("files") else None,
             "preview": str(job_dir / s["previews"][0]) if s.get("previews") else None,
+            "previews": [str(job_dir / p) for p in s.get("previews", [])],
+            "ai": s.get("ai"),
         } for s in project["shots"]],
     }
 

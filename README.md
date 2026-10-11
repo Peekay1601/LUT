@@ -5,6 +5,10 @@ It measures exposure, neutral balance, contrast and saturation on your Mac, and 
 which differences are intentional. It then builds **one stable, bounded grade per shot** as a `.cube`
 LUT, with before/after previews and a report.
 
+![Consistent Grade panel](docs/screenshots/panel.png)
+
+*Shots → look → Claude review → match; then a colour match map, exposure offsets and per-shot LUTs.*
+
 ## Install on macOS (Premiere Pro 25.6 or later)
 
 1. Download **[`dist/ConsistentGrade.ccx`](dist/ConsistentGrade.ccx)** and **double-click it**.

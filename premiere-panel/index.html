@@ -5,75 +5,239 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <sp-heading size="S">Consistent Grade</sp-heading>
+<div class="app">
 
-  <div class="row">
-    <span id="engine-status" class="muted">Engine: checking…</span>
+  <!-- Header -->
+  <div class="top">
+    <div class="brand">
+      <img class="mark" src="assets/mark.png" alt="">
+      <div>
+        <div class="title">Consistent Grade</div>
+        <div class="subtitle">Shot matching for Premiere</div>
+      </div>
+    </div>
+    <div class="pills">
+      <div class="pill" id="pill-engine" title="Engine status"><div class="dot" id="dot-engine"></div><span id="pill-engine-text">Engine</span></div>
+      <div class="pill" id="pill-claude" title="Claude status"><div class="dot" id="dot-claude"></div><span>Claude</span></div>
+    </div>
   </div>
-  <div class="row">
-    <sp-button id="btn-engine" variant="primary" size="s">Start engine</sp-button>
-  </div>
+  <div class="spectrum"></div>
 
-  <h2>Claude API key</h2>
-  <div class="row">
-    <sp-textfield id="api-key" type="password" placeholder="sk-ant-…" size="s" style="flex:1"></sp-textfield>
-  </div>
-  <div class="row">
-    <sp-button id="btn-key-save" variant="primary" size="s">Save key</sp-button>
-    <sp-button id="btn-key-test" variant="secondary" size="s">Test key</sp-button>
-    <sp-button id="btn-key-forget" variant="secondary" size="s">Forget key</sp-button>
-  </div>
-  <div class="muted" id="key-status">No key saved.</div>
-
-  <h2>1 · Clips</h2>
-  <div class="row">
-    <sp-button id="btn-read" variant="primary">Read selected clips</sp-button>
-  </div>
-  <div id="clips" class="muted">Select clips on the timeline, then click Read.</div>
-
-  <h2>2 · Reference &amp; look</h2>
-  <div class="row">
-    <sp-picker id="ref-picker" label="Reference" size="s"><sp-menu slot="options" id="ref-menu"><sp-menu-item value="">Most typical shot</sp-menu-item></sp-menu></sp-picker>
-  </div>
-  <div class="row">
-    <sp-button id="btn-ref-selected" variant="secondary" size="s">Use selected clip</sp-button>
-    <sp-button id="btn-ref-image" variant="secondary" size="s">Reference image…</sp-button>
-  </div>
-  <div class="muted" id="ref-label"></div>
-  <div class="row">
-    <sp-picker id="look-picker" label="Look" size="s">
-      <sp-menu slot="options">
-        <sp-menu-item value="none" selected>Match only (no look)</sp-menu-item>
-        <sp-menu-item value="natural_commercial">Natural commercial</sp-menu-item>
-        <sp-menu-item value="warm_documentary">Warm documentary</sp-menu-item>
-        <sp-menu-item value="muted_cinematic">Muted cinematic</sp-menu-item>
-        <sp-menu-item value="clean_product">Clean product</sp-menu-item>
-        <sp-menu-item value="ai">Let Claude suggest</sp-menu-item>
-      </sp-menu>
-    </sp-picker>
-  </div>
-  <div class="row">
-    <sp-checkbox id="ai-allowed">Ask Claude (sends small still frames, not video)</sp-checkbox>
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" data-tab="shots">Shots<span class="tab-count hidden" id="count-shots"></span></div>
+    <div class="tab" data-tab="results">Results<span class="tab-count hidden" id="count-results"></span></div>
+    <div class="tab" data-tab="setup">Setup<span class="tab-count hidden" id="count-setup">!</span></div>
   </div>
 
-  <h2>3 · Analyse</h2>
-  <div class="row">
-    <sp-button id="btn-analyze" variant="cta">Analyse &amp; build LUTs</sp-button>
-    <sp-button id="btn-cancel" variant="secondary" disabled>Cancel</sp-button>
-    <sp-button id="btn-report" variant="secondary" disabled>Open report</sp-button>
+  <div class="banner hidden" id="banner">
+    <div class="banner-text" id="banner-text"></div>
+    <div class="banner-close" id="banner-close">×</div>
   </div>
-  <sp-progressbar id="progress" max="100" value="0" style="width:100%"></sp-progressbar>
-  <div class="muted" id="stage"></div>
-  <div id="results"></div>
 
-  <h2>Diagnostics</h2>
-  <div class="row">
-    <sp-button id="btn-probe" variant="secondary" size="s">Run capability test</sp-button>
-    <sp-button id="btn-lumetri" variant="secondary" size="s">Inspect Lumetri params</sp-button>
+  <!-- ============================== SHOTS ============================== -->
+  <div class="page" id="page-shots">
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">STEP 1</div>
+          <div class="card-title">Shots from your timeline</div>
+        </div>
+        <div class="btn small" id="btn-read">Read selection</div>
+      </div>
+      <div id="clips"></div>
+      <div id="ref-image-chip" class="hidden"></div>
+      <div class="row" style="margin-top: 9px;">
+        <div class="hint" id="clips-hint">Click a shot to make it the reference.</div>
+        <div class="spacer"></div>
+        <div class="link" id="btn-ref-image">Match to a still…</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">STEP 2</div>
+          <div class="card-title">Look</div>
+        </div>
+        <div class="hint" id="look-hint">Applied after matching</div>
+      </div>
+      <div class="looks" id="looks"></div>
+    </div>
+
+    <div class="card">
+      <div class="toggle-row" id="claude-row">
+        <div class="toggle" id="claude-toggle"><div class="toggle-knob"></div></div>
+        <div class="toggle-text">
+          <div class="row"><div class="toggle-title">Ask Claude to review</div><div class="tag claude" style="margin-left:8px;">OPTIONAL</div></div>
+          <div class="hint" style="margin-top:3px;">Claude judges which differences are intentional lighting and suggests a look. Sends one still and one small strip per shot — never video.</div>
+          <div class="hint hidden" id="claude-needs-key" style="margin-top:4px;">Add your API key in <span class="link" data-goto="setup">Setup</span> to turn this on.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="run-area">
+      <div class="cta is-disabled" id="btn-analyze">
+        <div class="cta-main" id="cta-main">Match shots</div>
+        <div class="cta-sub" id="cta-sub">Read your selection to begin</div>
+      </div>
+      <div class="footnote">LUTs are written to ~/ConsistentGrade · your sequence is never modified</div>
+    </div>
+
+    <div class="card hidden" id="progress-card">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">WORKING</div>
+          <div class="card-title" id="progress-title">Matching shots…</div>
+        </div>
+        <div class="btn small quiet danger" id="btn-cancel">Cancel</div>
+      </div>
+      <div class="steps" id="steps"></div>
+      <div class="bar"><div class="bar-fill" id="bar-fill" style="width: 0%;"></div></div>
+      <div class="stage" id="stage"></div>
+    </div>
   </div>
-  <div id="probe"></div>
-  <div id="log"></div>
 
-  <script src="main.js"></script>
+  <!-- ============================== RESULTS ============================== -->
+  <div class="page hidden" id="page-results">
+    <div id="results-empty" class="card">
+      <div class="empty">
+        <img class="empty-mark" src="assets/mark.png" alt="">
+        <div class="empty-title">No results yet</div>
+        <div class="empty-text">Match a few shots and the per-shot LUTs, previews and a colour map will appear here.</div>
+        <div class="btn small" data-goto="shots">Go to Shots</div>
+      </div>
+    </div>
+    <div id="results" class="hidden">
+      <div class="card">
+        <div class="hero">
+          <div class="hero-num" id="hero-num">–</div>
+          <div class="hero-label">
+            <div class="hero-big" id="hero-big">closer to the reference</div>
+            <div class="hint" id="hero-sub"></div>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat ok"><div class="stat-num" id="stat-ok">0</div><div class="stat-label">MATCHED</div></div>
+          <div class="stat warn"><div class="stat-num" id="stat-review">0</div><div class="stat-label">REVIEW</div></div>
+          <div class="stat"><div class="stat-num" id="stat-skip">0</div><div class="stat-label">SKIPPED</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="eyebrow">COLOUR</div>
+            <div class="card-title">Match map</div>
+          </div>
+          <div class="hint">neutrals vs reference</div>
+        </div>
+        <div class="scope">
+          <div class="scope-axis">MAGENTA</div>
+          <div class="scope-mid">
+            <div class="scope-axis">COOL</div>
+            <canvas id="scope" class="scope-canvas" width="200" height="200"></canvas>
+            <div class="scope-axis">WARM</div>
+          </div>
+          <div class="scope-axis">GREEN</div>
+        </div>
+        <div class="legend" id="scope-legend"></div>
+        <div class="legend-key"><div class="k-hollow"></div>before<div class="k-solid"></div>after · centre = reference · rings = 5% steps</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="eyebrow">EXPOSURE</div>
+            <div class="card-title">Offset from reference</div>
+          </div>
+          <div class="hint">grey = before · colour = after</div>
+        </div>
+        <div id="ev-rows"></div>
+        <div class="ev-row ev-scale-row"><div class="ev-label"></div><div class="ev-scale" id="ev-scale"></div><div class="ev-val"></div></div>
+      </div>
+
+      <div id="shot-cards"></div>
+
+      <div class="card">
+        <div class="eyebrow" style="margin-bottom: 8px;">APPLY IN PREMIERE</div>
+        <div class="howto">
+          <div class="howto-step"><div class="howto-n">1</div><div>Click <b>Copy LUT</b> on a shot.</div></div>
+          <div class="howto-step"><div class="howto-n">2</div><div>Select that clip → Lumetri Color → Creative → Look → Browse…</div></div>
+          <div class="howto-step"><div class="howto-n">3</div><div>Press ⌘⇧G, paste, Open. Remove the Look to undo.</div></div>
+        </div>
+        <div class="row" style="margin-top: 12px;">
+          <div class="btn small" id="btn-report">Open report</div>
+          <div class="btn small" id="btn-look-lut">Copy look-only LUT</div>
+          <div class="btn small quiet" id="btn-folder">Show folder</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================== SETUP ============================== -->
+  <div class="page hidden" id="page-setup">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">ENGINE</div>
+          <div class="card-title" id="engine-title">Not running</div>
+        </div>
+        <div class="btn small primary" id="btn-engine">Start engine</div>
+      </div>
+      <div class="hint">Runs on your Mac in a Terminal window. The first start installs Python, OpenCV and FFmpeg (a few minutes). Keep the window open while you work.</div>
+      <div style="margin-top: 8px;">
+        <div class="kv"><div class="kv-k">Status</div><div class="kv-v" id="kv-engine">—</div></div>
+        <div class="kv"><div class="kv-k">FFmpeg</div><div class="kv-v" id="kv-ffmpeg">—</div></div>
+        <div class="kv"><div class="kv-k">Working folder</div><div class="kv-v mono" id="kv-folder">~/ConsistentGrade</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">CLAUDE</div>
+          <div class="card-title">API key</div>
+        </div>
+        <div class="tag" id="key-tag">NOT SET</div>
+      </div>
+      <sp-textfield id="api-key" class="keyfield" type="password" placeholder="sk-ant-…"></sp-textfield>
+      <div class="row">
+        <div class="btn small primary" id="btn-key-save">Save</div>
+        <div class="btn small" id="btn-key-test">Test</div>
+        <div class="spacer"></div>
+        <div class="btn small quiet danger" id="btn-key-forget">Forget</div>
+      </div>
+      <div class="hint" id="key-status" style="margin-top: 8px;">Stored encrypted by Premiere on this Mac.</div>
+      <div class="privacy">
+        <div class="privacy-icon">✓</div>
+        <div class="hint">Your key and frames go only to api.anthropic.com over HTTPS, and only when “Ask Claude” is on. The engine never sees the key. Without Claude, nothing leaves your Mac.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">DIAGNOSTICS</div>
+          <div class="card-title">Capability test</div>
+        </div>
+        <div class="row">
+          <div class="btn small" id="btn-probe">Run test</div>
+          <div class="btn small quiet" id="btn-lumetri">Lumetri params</div>
+        </div>
+      </div>
+      <div id="probe"><div class="hint">Checks what this Premiere version supports and whether the engine and Claude are reachable.</div></div>
+      <div class="row" style="margin-top: 10px;">
+        <div class="eyebrow">ACTIVITY LOG</div>
+        <div class="spacer"></div>
+        <div class="link" id="btn-log">Show</div>
+      </div>
+      <div class="log hidden" id="log"></div>
+    </div>
+  </div>
+
+</div>
+<script src="main.js"></script>
 </body>
 </html>

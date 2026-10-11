@@ -7,6 +7,7 @@ Usage: python packaging/build_ccx.py
 
 import json
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
@@ -19,6 +20,10 @@ ENGINE_REQUIREMENTS = "numpy>=1.26\nopencv-python-headless>=4.9\npillow>=10\n"
 
 
 def main() -> Path:
+    sys.path.insert(0, str(ROOT))
+    from packaging.make_assets import main as make_assets
+
+    make_assets()
     if BUILD.exists():
         shutil.rmtree(BUILD)
     shutil.copytree(PANEL, BUILD, ignore=shutil.ignore_patterns(".DS_Store"))
