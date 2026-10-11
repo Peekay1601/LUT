@@ -17,7 +17,7 @@ const fakeFs = {
     nfs.writeFileSync(resolve(p), typeof d === "string" ? d : Buffer.from(d instanceof ArrayBuffer ? d : d.buffer), { mode: o.mode });
     return 1;
   },
-  async mkdir(p, o) { nfs.mkdirSync(resolve(p), o); return 0; },
+  async mkdir(p, o) { if (nfs.existsSync(resolve(p))) throw new Error("file already exists"); nfs.mkdirSync(resolve(p), o); return 0; },
   async lstat(p) { return nfs.lstatSync(resolve(p)); },
   async unlink(p) { nfs.unlinkSync(resolve(p)); return 0; },
 };
@@ -50,6 +50,19 @@ const fakeUxp = {
 };
 
 const LUMETRI_MODE = process.env.LUMETRI_MODE || "accept";
+// Like Premiere: every handle goes stale after any transaction.
+let GEN = 0;
+const RAW = new WeakMap();
+function handle(o) {
+  const g = GEN;
+  const p = new Proxy(o, { get(t, k) {
+    const v = t[k];
+    if (typeof v !== "function" || k === "constructor") return v;
+    return (...a) => { if (g !== GEN) throw new Error("The script object is no longer valid."); return v.apply(t, a); };
+  } });
+  RAW.set(p, o);
+  return p;
+}
 const transactions = [];
 function makeParam(name, kind, dflt = kind === "string" ? "" : 0) {
   const p = { displayName: name, value: dflt, dflt };
@@ -64,20 +77,20 @@ function makeParam(name, kind, dflt = kind === "string" ? "" : 0) {
 }
 function makeLumetri() {
   const params = [makeParam("Exposure", "number"), makeParam("Input LUT", "number"), makeParam("Look", "string"), makeParam("Temperature", "number"), makeParam("Tint", "number"), makeParam("Contrast", "number"), makeParam("Saturation", "number", 100)];
-  return { matchName: "AE.ADBE Lumetri", params, getParamCount: () => params.length, getParam: (i) => params[i], getMatchName: async () => "AE.ADBE Lumetri" };
+  return { matchName: "AE.ADBE Lumetri", params, getParamCount: () => params.length, getParam: (i) => handle(params[i]), getMatchName: async () => "AE.ADBE Lumetri" };
 }
 function makeChain(list) {
   return {
     getComponentCount: () => list.length,
-    getComponentAtIndex: (i) => list[i],
-    createAppendComponentAction: (c) => ({ run: () => list.push(c) }),
-    createRemoveComponentAction: (c) => ({ run: () => list.splice(list.indexOf(c), 1) }),
+    getComponentAtIndex: (i) => handle(list[i]),
+    createAppendComponentAction: (c) => ({ run: () => list.push(RAW.get(c) || c) }),
+    createRemoveComponentAction: (c) => ({ run: () => list.splice(list.indexOf(RAW.get(c) || c), 1) }),
   };
 }
 const fakeProject = {
   async getActiveSequence() { return sequence; },
   lockedAccess(fn) { fn(); },
-  executeTransaction(cb, label) { const acts = []; cb({ addAction: (a) => acts.push(a) }); acts.forEach((a) => a.run()); transactions.push(label); return true; },
+  executeTransaction(cb, label) { const acts = []; cb({ addAction: (a) => acts.push(a) }); acts.forEach((a) => a.run()); transactions.push(label); GEN++; return true; },
 };
 
 class TickTime { constructor(s) { this.seconds = s; this.ticks = String(Math.round(s * 254016000000)); } }
@@ -91,7 +104,7 @@ class VideoClipTrackItem {
   async getSpeed() { return this.speed; }
   async isSpeedReversed() { return 0; }
   async isDisabled() { return false; }
-  async getComponentChain() { return makeChain(this.components); }
+  async getComponentChain() { return handle(makeChain(this.components)); }
   async getStartTime() { return new TickTime(this.start); }
   async getEndTime() { return new TickTime(this.start + this.outP - this.inP); }
   async getInPoint() { return new TickTime(this.inP); }
@@ -107,8 +120,8 @@ const items = [
 // What Premiere reports for each clip's Input LUT: placeholder, empty, or a real id.
 const LUT_IDS = { "a_reference.mp4": "00000000-0000-0000-0000-000000000000", "b_dark_green.mp4": "", "e_untagged.mp4": "6f1c2a9e-4b7d-4e2a-9c1f-1a2b3c4d5e6f" };
 const sequence = {
-  async getVideoTrack(i) { return { getTrackItems: () => items.filter((it) => it.speed === 1 || true) }; },
-  async getSelection() { return { async getTrackItems() { return items; } }; },
+  async getVideoTrack(i) { return { getTrackItems: () => items.map(handle) }; },
+  async getSelection() { return { async getTrackItems() { return items.map(handle); } }; },
   async getSettings() { return { getVideoFrameRate: () => ({ value: 24 }) }; },
   async getTimebase() { return "10584000000"; },
 };
@@ -130,7 +143,7 @@ const fakePpro = {
       for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
       for (let i = 0; i < px.length; i++) { h = (h * 1103515245 + 12345) >>> 0; px[i] = h >>> 24; }
       const header = Buffer.alloc(54); header.write("BM"); header.writeUInt32LE(54, 10);
-      nfs.writeFileSync(path.join(dir, name), Buffer.concat([header, px]));
+      nfs.writeFileSync(path.isAbsolute(name) ? name : path.join(dir, name), Buffer.concat([header, px]));
       return true;
     },
   },

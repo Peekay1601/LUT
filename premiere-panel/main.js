@@ -85,6 +85,11 @@ function banner(text, kind = "", ms = 6000) {
 }
 
 // ------------------------------------------------------------------ fs helpers
+// UXP's fs.mkdir throws "file already exists" even with recursive:true.
+async function mkdirp(path) {
+  if (await exists(path)) return;
+  try { await fs.mkdir(path, { recursive: true }); } catch (e) { if (!(await exists(path))) throw e; }
+}
 async function exists(path) { try { await fs.lstat(path); return true; } catch (e) { return false; } }
 async function readJson(path) { try { return JSON.parse(await fs.readFile(path, { encoding: "utf-8" })); } catch (e) { return null; } }
 async function writeJson(path, data) { await fs.writeFile(path, JSON.stringify(data, null, 2), { encoding: "utf-8" }); }
@@ -146,8 +151,8 @@ async function pollEngine() {
 
 async function startEngine() {
   const files = JSON.parse(await fs.readFile("plugin:/engine/files.json", { encoding: "utf-8" }));
-  await fs.mkdir(`${CG}/engine/autograde`, { recursive: true });
-  await fs.mkdir(JOBS, { recursive: true });
+  await mkdirp(`${CG}/engine/autograde`);
+  await mkdirp(JOBS);
   for (const rel of files) {
     await fs.writeFile(`${CG}/engine/${rel}`, await fs.readFile(`plugin:/engine/${rel}`));
   }
@@ -481,7 +486,7 @@ async function analyze() {
 
   const id = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14) + "_" + Math.random().toString(36).slice(2, 6);
   const dir = `${JOBS}/${id}`;
-  await fs.mkdir(dir, { recursive: true });
+  await mkdirp(dir);
   await writeJson(`${dir}/request.json`, {
     manifest: {
       ...state.manifest,
@@ -709,6 +714,8 @@ function renderResults() {
 // it carefully: add a fresh Lumetri (one undo step), set a Look/LUT parameter to
 // our .cube path, read it back, and remove the Lumetri again if that didn't stick.
 
+// Premiere invalidates script objects (clip, chain, component, param) after any
+// edit, so nothing is held across a transaction: everything is looked up fresh.
 async function findTrackItem(clipId) {
   const [trackIndex, ticks] = String(clipId || "").split(":");
   const project = await ppro.Project.getActiveProject();
@@ -718,7 +725,7 @@ async function findTrackItem(clipId) {
   if (!track) throw new Error("That clip's track no longer exists");
   const items = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
   for (const item of items) {
-    if ((await item.getStartTime()).ticks === ticks) return { project, item };
+    if ((await item.getStartTime()).ticks === ticks) return { project, sequence, item };
   }
   throw new Error("Couldn't find this shot on the timeline — was it moved or trimmed? Read the selection and match again.");
 }
@@ -731,7 +738,11 @@ function runTransaction(project, actions, label) {
   return ok;
 }
 
-const LUT_PARAM = /(look|lut)/i;
+function errText(e) {
+  if (e == null) return "unknown error";
+  if (typeof e === "string") return e;
+  return e.message || (e.toString && e.toString() !== "[object Object]" ? e.toString() : "") || JSON.stringify(e);
+}
 
 async function lumetriParams(component) {
   const out = [];
@@ -745,27 +756,34 @@ async function lumetriParams(component) {
 }
 
 // ---- verification: did the picture actually change?
-async function snapshot(sequence, item, tag) {
-  try {
-    if (typeof ppro.Exporter?.exportSequenceFrame !== "function") return null;
-    const dir = `${CG}/verify`;
-    await fs.mkdir(dir, { recursive: true });
-    const a = (await item.getStartTime()).seconds, b = (await item.getEndTime()).seconds;
-    const t = ppro.TickTime.createWithSeconds(a + (b - a) * 0.5);
-    const name = `${tag}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.bmp`;
-    await ppro.Exporter.exportSequenceFrame(sequence, t, name, dir, 192, 108);
-    const file = `${dir}/${name}`;
+async function snapshot(clipId, seconds, tag) {
+  if (typeof ppro.Exporter?.exportSequenceFrame !== "function") return null;
+  const dir = `${CG}/verify`;
+  await mkdirp(dir);
+  const { sequence } = await findTrackItem(clipId);
+  const t = ppro.TickTime.createWithSeconds(seconds);
+  const name = `${tag}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.bmp`;
+  const file = `${dir}/${name}`;
+  // The docs show both a bare name and a full path for "filename"; try both.
+  const variants = [[name, `${dir}/`], [file, dir]];
+  for (const [fname, fdir] of variants) {
+    try {
+      await ppro.Exporter.exportSequenceFrame(sequence, t, fname, fdir, 192, 108);
+    } catch (e) {
+      diag(`  frame export (${fname === name ? "name" : "path"}) failed: ${errText(e)}`);
+      continue;
+    }
     for (let i = 0; i < 40 && !(await exists(file)); i++) await sleep(150);
-    if (!(await exists(file))) return null;
-    await sleep(150); // let the writer finish
-    const bytes = new Uint8Array(await fs.readFile(file));
-    try { await fs.unlink(file); } catch (e) { /* keep */ }
-    const offset = bytes.length > 14 ? bytes[10] | (bytes[11] << 8) | (bytes[12] << 16) | (bytes[13] << 24) : 0;
-    return bytes.slice(offset);
-  } catch (e) {
-    diag(`snapshot failed: ${e.message}`);
-    return null;
+    if (await exists(file)) {
+      await sleep(150);
+      const bytes = new Uint8Array(await fs.readFile(file));
+      try { await fs.unlink(file); } catch (e) { /* keep */ }
+      const offset = bytes.length > 14 ? bytes[10] | (bytes[11] << 8) | (bytes[12] << 16) | (bytes[13] << 24) : 0;
+      return bytes.slice(offset);
+    }
+    diag(`  frame export (${fname === name ? "name" : "path"}) wrote no file`);
   }
+  return null;
 }
 function pixelDiff(a, b) {
   if (!a || !b) return null;
@@ -776,41 +794,62 @@ function pixelDiff(a, b) {
   return sum / n;
 }
 
-// ---- Lumetri helpers
-async function addLumetri(project, item) {
+// ---- Lumetri helpers (each re-fetches the clip)
+async function lumetriMatchName() {
   const names = await ppro.VideoFilterFactory.getMatchNames();
   const lumetri = names.find((n) => /lumetri/i.test(n));
   if (!lumetri) throw new Error("Lumetri Color isn't available in this Premiere");
+  return lumetri;
+}
+// Adds a Lumetri at the end of the chain; returns its index.
+async function addLumetri(clipId) {
+  const matchName = await lumetriMatchName();
+  const component = await ppro.VideoFilterFactory.createComponent(matchName);
+  const { project, item } = await findTrackItem(clipId);
   const chain = await item.getComponentChain();
-  const component = await ppro.VideoFilterFactory.createComponent(lumetri);
+  const index = chain.getComponentCount();
   if (!runTransaction(project, [chain.createAppendComponentAction(component)], "Consistent Grade: add Lumetri Color")) {
     throw new Error("Premiere refused to add Lumetri Color");
   }
-  const fresh = await item.getComponentChain();
-  return fresh.getComponentAtIndex(fresh.getComponentCount() - 1);
+  return index;
 }
-async function removeComponent(project, item, component) {
+async function componentAt(clipId, index) {
+  const { project, item } = await findTrackItem(clipId);
+  const chain = await item.getComponentChain();
+  if (index >= chain.getComponentCount()) throw new Error("added Lumetri not found");
+  return { project, chain, component: chain.getComponentAtIndex(index) };
+}
+async function removeComponentAt(clipId, index) {
   try {
-    const chain = await item.getComponentChain();
+    const { project, chain, component } = await componentAt(clipId, index);
     runTransaction(project, [chain.createRemoveComponentAction(component)], "Consistent Grade: remove Lumetri Color");
-  } catch (e) { diag(`remove failed: ${e.message}`); }
+  } catch (e) { diag(`  remove failed: ${errText(e)}`); }
 }
-function setParams(project, pairs, label) {
+// Sets params (by index) on the component at `index`; returns {ok, readBack}.
+async function setParamsAt(clipId, index, pairs, label) {
+  const { project, component } = await componentAt(clipId, index);
   const actions = [];
-  for (const [param, value] of pairs) {
+  for (const [paramIndex, value] of pairs) {
+    const param = component.getParam(paramIndex);
     try {
-      if (typeof param.createSetTimeVaryingAction === "function" && param.areKeyframesSupported) {
-        // keep values static (no keyframes) when the API offers it
-      }
       actions.push(param.createSetValueAction(param.createKeyframe(value), true));
     } catch (e) {
-      diag(`  "${param.displayName}" rejected ${JSON.stringify(value)}: ${e.message}`);
+      diag(`  "${param.displayName}" rejected ${JSON.stringify(value)}: ${errText(e)}`);
     }
   }
-  if (!actions.length) return false;
-  return runTransaction(project, actions, label);
+  if (!actions.length) return { ok: false, readBack: [] };
+  let ok = false;
+  try { ok = runTransaction(project, actions, label); } catch (e) { diag(`  set failed: ${errText(e)}`); }
+  const readBack = [];
+  try {
+    const fresh = (await componentAt(clipId, index)).component;
+    for (const [paramIndex] of pairs) {
+      try { readBack.push(JSON.stringify((await fresh.getParam(paramIndex).getStartValue()).value.value)); } catch (e) { readBack.push("?"); }
+    }
+  } catch (e) { readBack.push(`(read back failed: ${errText(e)})`); }
+  return { ok, readBack };
 }
-const findParam = (params, re, not) => params.find((p) => re.test(p.name || "") && !(not && not.test(p.name || "")));
+const findParam = (params, re) => params.find((p) => re.test(p.name || ""));
 
 // Approximate the shot's match grade with Lumetri Basic Correction sliders.
 function sliderValues(shot) {
@@ -834,64 +873,57 @@ function isIdentity(shot) {
 const METHOD_LABEL = { look: "LUT in Lumetri Look", input: "LUT in Lumetri Input LUT", sliders: "Lumetri sliders (approx.)", none: "nothing to change" };
 
 async function applyLutToShot(shot) {
-  const { project, item } = await findTrackItem(shot.clip_id);
-  const sequence = await project.getActiveSequence();
+  const clipId = shot.clip_id;
+  const first = await findTrackItem(clipId);
+  const a = (await first.item.getStartTime()).seconds, b = (await first.item.getEndTime()).seconds;
+  const mid = a + (b - a) * 0.5;
   diag(`— ${shot.name} (${shot.shot_id}) · ${shot.grade_cube}`);
-  const before = await snapshot(sequence, item, "before");
-  // A second baseline tells us how much Premiere's own rendering varies frame to frame.
-  const before2 = before ? await snapshot(sequence, item, "before2") : null;
+
+  let before = null, before2 = null;
+  try { before = await snapshot(clipId, mid, "before"); } catch (e) { diag(`  snapshot failed: ${errText(e)}`); }
+  if (before) { try { before2 = await snapshot(clipId, mid, "before2"); } catch (e) { /* noise unknown */ } }
   const noise = pixelDiff(before, before2) || 0;
   const threshold = Math.max(0.02, noise * 3 + 0.02);
-  diag(`  baseline frame: ${before ? `${before.length} bytes, render noise ${noise.toFixed(3)}, threshold ${threshold.toFixed(3)}` : "unavailable (can't verify visually)"}`);
+  diag(`  baseline frame: ${before ? `${before.length} bytes, render noise ${noise.toFixed(3)}` : "unavailable (can't verify visually)"}`);
 
   const attempts = [
-    { method: "look", run: async (params) => { const p = findParam(params, /look/i); return p ? [[p.param, shot.grade_cube]] : null; } },
-    { method: "input", run: async (params) => { const p = findParam(params, /input\s*lut/i); return p ? [[p.param, shot.grade_cube]] : null; } },
-    { method: "sliders", run: async (params) => {
-      const vals = sliderValues(shot);
-      const pairs = [];
-      for (const [name, value] of Object.entries(vals)) {
+    { method: "look", pairs: (params) => { const p = findParam(params, /look/i); return p ? [[p.index, shot.grade_cube]] : null; } },
+    { method: "input", pairs: (params) => { const p = findParam(params, /input\s*lut/i); return p ? [[p.index, shot.grade_cube]] : null; } },
+    { method: "sliders", pairs: (params) => {
+      const out = [];
+      for (const [name, value] of Object.entries(sliderValues(shot))) {
         const p = params.find((x) => (x.name || "").trim().toLowerCase() === name.toLowerCase());
-        if (p) pairs.push([p.param, value]);
-        else diag(`  no Lumetri param named "${name}"`);
+        if (p) out.push([p.index, value]); else diag(`  no Lumetri param named "${name}"`);
       }
-      return pairs.length ? pairs : null;
+      return out.length ? out : null;
     } },
   ];
+  // Without a test frame we can't tell whether a LUT path really renders, so use sliders.
+  const usable = before ? attempts : attempts.filter((x) => x.method === "sliders");
+  if (!before) diag("  no test frame: using Lumetri sliders");
 
   let paramDump = null;
-  // Without a test frame we can't tell whether a LUT path really renders (Premiere
-  // may store it and ignore it), so go straight to sliders, which always render.
-  const usable = before ? attempts : attempts.filter((x) => x.method === "sliders");
-  if (!before) diag("  no test frame: skipping LUT-path methods, using Lumetri sliders");
   for (const attempt of usable) {
-    if (attempt.method === "sliders" && isIdentity(shot)) {
-      diag("  sliders: grade is (near) identity, nothing to set");
-      continue;
+    if (attempt.method === "sliders" && isIdentity(shot)) { diag("  sliders: grade is (near) identity"); continue; }
+    let index;
+    try { index = await addLumetri(clipId); } catch (e) { diag(`  ${attempt.method}: add Lumetri failed: ${errText(e)}`); continue; }
+    try {
+      const params = await lumetriParams((await componentAt(clipId, index)).component);
+      if (!paramDump) paramDump = params.map((p) => `${p.index}\t${p.name}\t${JSON.stringify(p.value)}`).join("\n");
+      const pairs = attempt.pairs(params);
+      if (!pairs) { diag(`  ${attempt.method}: no matching Lumetri parameter`); await removeComponentAt(clipId, index); continue; }
+      const { ok, readBack } = await setParamsAt(clipId, index, pairs, `Consistent Grade: ${METHOD_LABEL[attempt.method]}`);
+      await sleep(250);
+      let after = null;
+      if (before) { try { after = await snapshot(clipId, mid, "after"); } catch (e) { diag(`  snapshot failed: ${errText(e)}`); } }
+      const d = pixelDiff(before, after);
+      diag(`  ${attempt.method}: set=${ok} readBack=${readBack.join(",")} pixelDiff=${d == null ? "n/a" : d.toFixed(3)} (threshold ${threshold.toFixed(3)})`);
+      const changed = d == null ? ok : d > threshold;
+      if (ok && changed) return { ok: true, method: attempt.method, verified: d != null };
+    } catch (e) {
+      diag(`  ${attempt.method}: ${errText(e)}`);
     }
-    const component = await addLumetri(project, item);
-    const params = await lumetriParams(component);
-    if (!paramDump) paramDump = params.map((p) => `${p.index}\t${p.name}\t${JSON.stringify(p.value)}`).join("\n");
-    const pairs = await attempt.run(params);
-    if (!pairs) {
-      diag(`  ${attempt.method}: no matching Lumetri parameter`);
-      await removeComponent(project, item, component);
-      continue;
-    }
-    const ok = setParams(project, pairs, `Consistent Grade: ${METHOD_LABEL[attempt.method]}`);
-    const readBack = [];
-    for (const [param] of pairs) {
-      try { readBack.push(JSON.stringify((await param.getStartValue()).value.value)); } catch (e) { readBack.push("?"); }
-    }
-    await sleep(250);
-    const after = await snapshot(sequence, item, "after");
-    const d = pixelDiff(before, after);
-    diag(`  ${attempt.method}: set=${ok} readBack=${readBack.join(",")} pixelDiff=${d == null ? "n/a" : d.toFixed(2)}`);
-    const changed = d == null ? ok : d > threshold;
-    if (ok && changed) {
-      return { ok: true, method: attempt.method, verified: d != null };
-    }
-    await removeComponent(project, item, component);
+    await removeComponentAt(clipId, index);
   }
   if (isIdentity(shot) && shot.is_reference) return { ok: true, method: "none", verified: true };
   diag(`  Lumetri params:\n${paramDump || "(none read)"}`);
@@ -907,7 +939,7 @@ async function applyShots(shots) {
       if (r.ok) state.applied[shot.shot_id] = r.method;
     } catch (e) {
       results.push({ shot, ok: false });
-      diag(`${shot.name}: ${e.message}`);
+      diag(`${shot.name}: ${errText(e)}`);
     }
   }
   renderResults();
@@ -963,7 +995,7 @@ async function capabilityTest() {
     return hit.length ? hit.join(", ") : false;
   });
   await check("Frame export API", () => typeof ppro.Exporter?.exportSequenceFrame === "function");
-  await check("Write ~/ConsistentGrade", async () => { await fs.mkdir(JOBS, { recursive: true }); await writeJson(`${CG}/.probe.json`, { t: Date.now() }); return true; });
+  await check("Write ~/ConsistentGrade", async () => { await mkdirp(JOBS); await writeJson(`${CG}/.probe.json`, { t: Date.now() }); return true; });
   await check("Secure key storage", () => !!secure);
   await check("Engine", async () => ((await pollEngine()) ? `v${state.engine.version}` : false));
   await check("api.anthropic.com", async () => `HTTP ${(await fetch(`${ANTHROPIC}/v1/models`)).status}`);
