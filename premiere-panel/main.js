@@ -50,6 +50,7 @@ const state = {
   job: null,
   summary: null,
   approvals: {},
+  applied: {},
   previewIndex: {},
 };
 
@@ -645,7 +646,8 @@ function shotCard(s) {
       ${why.length ? `<div class="why">${why.map(esc).join("<br>")}</div>` : ""}
       ${ai ? `<div class="ai-note"><b>Claude:</b> ${esc([ai.exposure, ai.colour_cast, ai.lighting_intent].filter(Boolean).join(" · "))}</div>` : ""}
       <div class="shot-actions">
-        <div class="btn small primary" data-copy="${esc(s.grade_cube)}">Copy LUT</div>
+        <div class="btn small primary" data-apply="${esc(s.shot_id)}">${state.applied[s.shot_id] ? "✓ Applied" : "Apply to clip"}</div>
+        <div class="btn small" data-copy="${esc(s.grade_cube)}">Copy LUT</div>
         <div class="btn small ${approved ? "on" : ""}" data-approve="${esc(s.shot_id)}">${approved ? "✓ Approved" : "Approve"}</div>
         <div class="spacer"></div>
         <div class="btn small quiet" data-copy="${esc(s.match_cube)}" title="Match only, without the look">Match-only</div>
@@ -685,6 +687,11 @@ function renderResults() {
     await navigator.clipboard.setContent({ "text/plain": b.dataset.copy });
     banner(`Copied <b>${esc(basename(b.dataset.copy.replace(/\/[^/]+$/, "")))}/${esc(basename(b.dataset.copy))}</b> — in Lumetri’s Look › Browse…, press ⌘⇧G and paste.`, "ok");
   })));
+  document.querySelectorAll("[data-apply]").forEach((b) => b.addEventListener("click", guard(async () => {
+    const shot = state.summary.shots.find((x) => x.shot_id === b.dataset.apply);
+    b.textContent = "Applying…";
+    await applyShots([shot]);
+  })));
   document.querySelectorAll("[data-approve]").forEach((b) => b.addEventListener("click", guard(async () => {
     state.approvals[b.dataset.approve] = !state.approvals[b.dataset.approve];
     await writeJson(`${state.job}/approvals.json`, state.approvals);
@@ -694,6 +701,109 @@ function renderResults() {
     state.previewIndex[t.dataset.prev] = Number(t.dataset.i);
     renderResults();
   }));
+}
+
+// ------------------------------------------------------------------ apply to timeline (beta)
+// Premiere documents adding Lumetri and setting effect parameters, but not which
+// Lumetri parameter holds a LUT file or whether it accepts a path. So this tries
+// it carefully: add a fresh Lumetri (one undo step), set a Look/LUT parameter to
+// our .cube path, read it back, and remove the Lumetri again if that didn't stick.
+
+async function findTrackItem(clipId) {
+  const [trackIndex, ticks] = String(clipId || "").split(":");
+  const project = await ppro.Project.getActiveProject();
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("Open the sequence these shots came from");
+  const track = await sequence.getVideoTrack(Number(trackIndex));
+  if (!track) throw new Error("That clip's track no longer exists");
+  const items = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
+  for (const item of items) {
+    if ((await item.getStartTime()).ticks === ticks) return { project, item };
+  }
+  throw new Error("Couldn't find this shot on the timeline — was it moved or trimmed? Read the selection and match again.");
+}
+
+function runTransaction(project, actions, label) {
+  let ok = false;
+  project.lockedAccess(() => {
+    ok = project.executeTransaction((compound) => { for (const a of actions) compound.addAction(a); }, label);
+  });
+  return ok;
+}
+
+const LUT_PARAM = /(look|lut)/i;
+
+async function lumetriParams(component) {
+  const out = [];
+  for (let k = 0; k < component.getParamCount(); k++) {
+    const p = component.getParam(k);
+    let value = null;
+    try { value = (await p.getStartValue()).value.value; } catch (e) { /* unreadable */ }
+    out.push({ index: k, name: p.displayName, value, param: p });
+  }
+  return out;
+}
+
+async function applyLutToShot(shot) {
+  const { project, item } = await findTrackItem(shot.clip_id);
+  const names = await ppro.VideoFilterFactory.getMatchNames();
+  const lumetri = names.find((n) => /lumetri/i.test(n));
+  if (!lumetri) throw new Error("Lumetri Color isn't available in this Premiere");
+
+  const chain = await item.getComponentChain();
+  const component = await ppro.VideoFilterFactory.createComponent(lumetri);
+  if (!runTransaction(project, [chain.createAppendComponentAction(component)], "Consistent Grade: add Lumetri")) {
+    throw new Error("Premiere refused to add Lumetri Color");
+  }
+  // The appended instance is the last component in the chain.
+  const fresh = await item.getComponentChain();
+  const added = fresh.getComponentAtIndex(fresh.getComponentCount() - 1);
+  const params = await lumetriParams(added);
+  const candidates = params.filter((p) => LUT_PARAM.test(p.name || ""));
+  // Prefer the Creative "Look" over the Basic "Input LUT" (the LUT expects Rec.709 in).
+  candidates.sort((a, b) => (/look/i.test(b.name) ? 1 : 0) - (/look/i.test(a.name) ? 1 : 0));
+
+  for (const c of candidates) {
+    let keyframe;
+    try { keyframe = c.param.createKeyframe(shot.grade_cube); } catch (e) { continue; } // not a path-type parameter
+    try {
+      if (!runTransaction(project, [c.param.createSetValueAction(keyframe, true)], "Consistent Grade: apply LUT")) continue;
+    } catch (e) { continue; }
+    let readBack = null;
+    try { readBack = (await c.param.getStartValue()).value.value; } catch (e) { /* ignore */ }
+    if (String(readBack || "").includes(basename(shot.grade_cube))) {
+      log(`${shot.name}: LUT set on Lumetri "${c.name}" (param ${c.index})`);
+      return { ok: true, param: c.name };
+    }
+  }
+  // Didn't stick: remove the Lumetri we added so the clip is exactly as before.
+  try { runTransaction(project, [fresh.createRemoveComponentAction(added)], "Consistent Grade: remove Lumetri"); } catch (e) { /* leave it */ }
+  log(`${shot.name}: couldn't set a LUT path. Lumetri params:\n` +
+      params.map((p) => `${p.index}\t${p.name}\t${JSON.stringify(p.value)}`).join("\n"));
+  return { ok: false };
+}
+
+async function applyShots(shots) {
+  const done = [], failed = [];
+  for (const shot of shots) {
+    try {
+      const r = await applyLutToShot(shot);
+      (r.ok ? done : failed).push(shot);
+      if (r.ok) state.applied[shot.shot_id] = true;
+    } catch (e) {
+      failed.push(shot);
+      log(`${shot.name}: ${e.message}`);
+    }
+  }
+  renderResults();
+  if (!failed.length) {
+    banner(`Applied ${done.length} LUT${done.length === 1 ? "" : "s"} — each added as a new Lumetri Color. Press ⌘Z to undo.`, "ok");
+  } else if (done.length) {
+    banner(`Applied ${done.length}, couldn't apply ${failed.length} (${failed.map((x) => esc(x.name)).join(", ")}). Use Copy LUT for those.`, "warn", 0);
+  } else {
+    await navigator.clipboard.setContent({ "text/plain": failed[0].grade_cube });
+    banner("This Premiere version didn't accept the LUT path, so nothing was changed. The path is copied — apply it in Lumetri › Creative › Look › Browse… (⌘⇧G, paste). Please send the Activity log from Setup so this can be fixed.", "warn", 0);
+  }
 }
 
 // ------------------------------------------------------------------ diagnostics
@@ -797,6 +907,12 @@ $("btn-cancel").addEventListener("click", guard(async () => {
 }));
 $("btn-report").addEventListener("click", guard(async () => {
   await uxp.shell.openPath(state.summary.report, "Opens the Consistent Grade report in your browser");
+}));
+$("btn-apply-all-wrap").addEventListener("click", guard(async () => {
+  const shots = state.summary.shots.filter((x) => x.status === "ok" && !state.applied[x.shot_id]);
+  if (!shots.length) return banner("Every matched shot already has its LUT applied.", "ok");
+  $("btn-apply-all").textContent = "Applying…";
+  try { await applyShots(shots); } finally { $("btn-apply-all").textContent = "Apply all to timeline"; }
 }));
 $("btn-look-lut").addEventListener("click", guard(async () => {
   await navigator.clipboard.setContent({ "text/plain": state.summary.look_cube });

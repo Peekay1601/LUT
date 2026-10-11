@@ -22,8 +22,9 @@ LUT, with before/after previews and a report.
 4. *(Optional)* Paste your Claude API key → **Test key** → **Save key**.
 
 Then: select clips on the timeline → **Read selected clips** → choose a reference and a look →
-**Analyse & build LUTs** → for each shot, **Copy LUT path** → Lumetri Color › Creative › Look ›
-Browse… → ⌘⇧G → paste.
+**Match** → on Results, **Apply all to timeline** (beta: adds a Lumetri Color with each shot's LUT;
+⌘Z undoes it). If your Premiere doesn't accept that, nothing changes and you use **Copy LUT** →
+Lumetri Color › Creative › Look › Browse… → ⌘⇧G → paste.
 
 The panel never changes your sequence. Clips with speed changes, reverse playback, nesting, offline
 media, an Input LUT or an existing Lumetri grade are flagged and skipped.

@@ -27,7 +27,7 @@ panel's **Run capability test** and [ACCEPTANCE.md](ACCEPTANCE.md) on your insta
 | Lumetri available | `VideoFilterFactory.getMatchNames()` contains a Lumetri match name | Documented factory; the **Lumetri match name is not documented** (`AE.ADBE Lumetri` is an assumption that is checked at runtime) | capability test only |
 | Add an effect | `VideoFilterFactory.createComponent()` + `chain.createAppendComponentAction()` inside `project.executeTransaction()` | Documented | **no** (MVP is non-destructive) |
 | Set effect parameters | `ComponentParam.createKeyframe()` + `createSetValueAction()` | Documented generically; **Lumetri parameter indices/meanings are not documented** | read-only inspector only |
-| Assign a LUT file to Lumetri (Input LUT / Look) | — | **Unsupported**: no documented API | no → guided manual application |
+| Assign a LUT file to Lumetri (Input LUT / Look) | — | **Not documented.** The panel's *Apply to clip* (beta) tries it with documented calls: it appends a Lumetri Color, sets the parameter named Look/LUT to the .cube path with `createKeyframe` + `createSetValueAction` in one undoable transaction, reads it back, and removes that Lumetri again if it didn't stick | yes, beta, with manual fallback |
 | Set a media Input LUT | `ClipProjectItem.createSetInputLUTIDAction(id)` | Documented, but **no documented way to get an ID for a .cube file** | no |
 | Undo transactions | `project.executeTransaction(cb, undoString)`, `lockedAccess` | Documented | not needed yet |
 | Export a rendered frame | `Exporter.exportSequenceFrame(seq, time, name, folder, w, h)` | Documented | not yet (see the next steps in the README) |

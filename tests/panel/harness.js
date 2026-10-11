@@ -49,15 +49,49 @@ const fakeUxp = {
   },
 };
 
+const LUMETRI_MODE = process.env.LUMETRI_MODE || "accept";
+const transactions = [];
+function makeParam(name, kind) {
+  const p = { displayName: name, value: kind === "string" ? "" : 0 };
+  p.createKeyframe = (v) => {
+    if (kind === "string" && LUMETRI_MODE !== "accept") throw new Error("incompatible value");
+    if (typeof v !== (kind === "string" ? "string" : "number")) throw new Error("incompatible value");
+    return { value: { value: v } };
+  };
+  p.createSetValueAction = (kf) => ({ run: () => { p.value = kf.value.value; } });
+  p.getStartValue = async () => ({ value: { value: p.value } });
+  return p;
+}
+function makeLumetri() {
+  const params = [makeParam("Exposure", "number"), makeParam("Input LUT", "number"), makeParam("Look", "string"), makeParam("Saturation", "number")];
+  return { matchName: "AE.ADBE Lumetri", params, getParamCount: () => params.length, getParam: (i) => params[i], getMatchName: async () => "AE.ADBE Lumetri" };
+}
+function makeChain(list) {
+  return {
+    getComponentCount: () => list.length,
+    getComponentAtIndex: (i) => list[i],
+    createAppendComponentAction: (c) => ({ run: () => list.push(c) }),
+    createRemoveComponentAction: (c) => ({ run: () => list.splice(list.indexOf(c), 1) }),
+  };
+}
+const fakeProject = {
+  async getActiveSequence() { return sequence; },
+  lockedAccess(fn) { fn(); },
+  executeTransaction(cb, label) { const acts = []; cb({ addAction: (a) => acts.push(a) }); acts.forEach((a) => a.run()); transactions.push(label); return true; },
+};
+
 class TickTime { constructor(s) { this.seconds = s; this.ticks = String(Math.round(s * 254016000000)); } }
 class VideoClipTrackItem {
-  constructor(name, file, inP, outP, start, speed = 1) { Object.assign(this, { name, file, inP, outP, start, speed }); }
+  constructor(name, file, inP, outP, start, speed = 1) {
+    Object.assign(this, { name, file, inP, outP, start, speed });
+    this.components = [{ getMatchName: async () => "AE.ADBE Opacity" }, { getMatchName: async () => "AE.ADBE Motion" }];
+  }
   async getName() { return this.name; }
   async getProjectItem() { return { file: this.file }; }
   async getSpeed() { return this.speed; }
   async isSpeedReversed() { return 0; }
   async isDisabled() { return false; }
-  async getComponentChain() { const m = ["AE.ADBE Opacity", "AE.ADBE Motion"]; return { getComponentCount: () => 2, getComponentAtIndex: (i) => ({ getMatchName: async () => m[i] }) }; }
+  async getComponentChain() { return makeChain(this.components); }
   async getStartTime() { return new TickTime(this.start); }
   async getEndTime() { return new TickTime(this.start + this.outP - this.inP); }
   async getInPoint() { return new TickTime(this.inP); }
@@ -73,17 +107,19 @@ const items = [
 // What Premiere reports for each clip's Input LUT: placeholder, empty, or a real id.
 const LUT_IDS = { "a_reference.mp4": "00000000-0000-0000-0000-000000000000", "b_dark_green.mp4": "", "e_untagged.mp4": "6f1c2a9e-4b7d-4e2a-9c1f-1a2b3c4d5e6f" };
 const sequence = {
+  async getVideoTrack(i) { return { getTrackItems: () => items.filter((it) => it.speed === 1 || true) }; },
   async getSelection() { return { async getTrackItems() { return items; } }; },
   async getSettings() { return { getVideoFrameRate: () => ({ value: 24 }) }; },
   async getTimebase() { return "10584000000"; },
 };
 const fakePpro = {
   VideoClipTrackItem,
-  Project: { async getActiveProject() { return { async getActiveSequence() { return sequence; } }; } },
+  Project: { async getActiveProject() { return fakeProject; } },
+  Constants: { TrackItemType: { CLIP: 1 } },
   ClipProjectItem: { cast: (pi) => ({
     async isSequence() { return false; }, async isOffline() { return false; },
     async getMediaFilePath() { return pi.file; }, async getInputLUTID() { return LUT_IDS[path.basename(pi.file)] ?? ""; } }) },
-  VideoFilterFactory: { async getMatchNames() { return ["AE.ADBE Lumetri"]; } },
+  VideoFilterFactory: { async getMatchNames() { return ["AE.ADBE Lumetri"]; }, async createComponent() { return makeLumetri(); } },
   Exporter: { exportSequenceFrame() {} },
 };
 
@@ -169,7 +205,31 @@ async function fakeFetch(url, init = {}) {
   console.log("shot cards:", document.querySelectorAll("#shot-cards .card").length, "| ev rows:", document.querySelectorAll("#ev-rows .ev-row").length);
   console.log("claude calls:", claudeCalls.length, "images:", claudeCalls[0] && claudeCalls[0].messages[0].content.filter((c) => c.type === "image").length);
 
-  // 5. Copy a LUT path, approve a shot, open the report.
+  // 5. Apply all LUTs to the timeline (beta path).
+  await click("btn-apply-all-wrap", 600);
+  const lumetris = items.map((it) => it.components.filter((c) => c.matchName === "AE.ADBE Lumetri"));
+  const looks = lumetris.map((l) => (l[0] ? path.basename(l[0].params[2].value || "") : "-"));
+  console.log("mode:", LUMETRI_MODE, "| transactions:", transactions.length, "| Look per clip:", looks.join(", "));
+  console.log("banner:", text("banner-text").slice(0, 120));
+  if (LUMETRI_MODE === "accept") {
+    if (looks.filter((l) => l === "grade.cube").length !== 3) done(1, "expected 3 clips with the LUT applied");
+    // Each clip must carry its own shot's LUT (shot ids follow timeline order).
+    const byStart = [...items].sort((x, y) => x.start - y.start);
+    for (const it of items) {
+      const l = it.components.find((c) => c.matchName === "AE.ADBE Lumetri");
+      if (!l) continue;
+      const expected = `shot_${String(byStart.indexOf(it) + 1).padStart(3, "0")}`;
+      if (path.basename(path.dirname(l.params[2].value)) !== expected) done(1, `${it.name} got ${l.params[2].value}, expected ${expected}`);
+    }
+    console.log("each clip has its own shot's LUT: ok");
+    if (!/Applied 3 LUTs/.test(text("banner-text"))) done(1, "missing success banner");
+  } else {
+    if (lumetris.some((l) => l.length)) done(1, "rollback failed: Lumetri left on a clip");
+    if (!/nothing was changed/.test(text("banner-text"))) done(1, "missing fallback banner");
+    if (!/Lumetri params/.test($("log").textContent)) done(1, "params not logged for diagnosis");
+  }
+
+  // 6. Copy a LUT path, approve a shot, open the report.
   await click(document.querySelector("[data-copy]"));
   await click(document.querySelector("[data-approve]"));
   const approvals = JSON.parse(nfs.readFileSync(path.join(path.dirname(clip[0]), "..", "approvals.json"), "utf8"));
