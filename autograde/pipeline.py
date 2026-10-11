@@ -98,7 +98,7 @@ def _rel(p: Path, root: Path) -> str:
 
 def run(shots: list[Shot], out: Path, opts: Options, log: Callable[[str], None] = print,
         api_key: str | None = None, progress: Callable[[float, str], None] | None = None,
-        should_cancel: Callable[[], bool] | None = None) -> dict:
+        should_cancel: Callable[[], bool] | None = None, provider: "ai.Provider | None" = None) -> dict:
     """Run the analysis.
 
     ``api_key`` is used only for the Claude call and is never written to disk.
@@ -193,7 +193,8 @@ def run(shots: list[Shot], out: Path, opts: Options, log: Callable[[str], None] 
 
     # ---------------- AI guidance ----------------
     guidance_doc = None
-    provider = ai.get_provider(opts.ai_mode, out, api_key=api_key, model=opts.ai_model, guidance_path=opts.ai_guidance)
+    if provider is None:
+        provider = ai.get_provider(opts.ai_mode, out, api_key=api_key, model=opts.ai_model, guidance_path=opts.ai_guidance)
     if provider is not None:
         check()
         progress(0.6, f"AI guidance ({provider.name})")
@@ -286,7 +287,7 @@ def run(shots: list[Shot], out: Path, opts: Options, log: Callable[[str], None] 
         "reference": {"description": ref_desc, "shot_id": ref_shot_id, "measurements": ref_meas,
                       "preview": _rel(ref_preview, out)},
         "look": look.to_dict(),
-        "ai": {"mode": opts.ai_mode, "look": (guidance_doc or {}).get("look")},
+        "ai": {"mode": provider.name if provider else "off", "look": (guidance_doc or {}).get("look")},
         "consistency": consistency,
         "shots": results,
         "files": {"contact_before": "contact_sheet_before.jpg", "contact_after": "contact_sheet_after.jpg",

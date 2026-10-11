@@ -1,6 +1,6 @@
 # Premiere integration capability matrix
 
-Target: **Premiere Pro 25.6+ with UXP plugins** (UXP is GA from 25.6.0; 25.2 was the public beta).
+Target: **Premiere Pro 25.6+ with UXP plugins** (built for 26.5 on macOS) (UXP is GA from 25.6.0; 25.2 was the public beta).
 Sources: Adobe's UXP Premiere reference (`developer.adobe.com/premiere-pro/uxp/ppro-reference/`, repo
 `AdobeDocs/uxp-premiere-pro`, checked 2026-10-11) and `AdobeDocs/uxp-premiere-pro-samples`.
 
@@ -33,8 +33,13 @@ panel's **Run capability test** and [ACCEPTANCE.md](ACCEPTANCE.md) on your insta
 | Export a rendered frame | `Exporter.exportSequenceFrame(seq, time, name, folder, w, h)` | Documented | not yet (see the next steps in the README) |
 | Export the sequence | `EncoderManager.getManager().exportSequence(...)` | Documented | no |
 | Markers / XMP metadata | `Markers.getMarkers()`, `Metadata.*` | Documented | no |
-| `http://localhost` from the panel | manifest `network.domains` | Documented for domains; **Adobe notes macOS may block plain `http://`** | yes → TLS option on the service |
-| Secret storage | `uxp.storage.secureStorage` | Generic UXP API; **availability in Premiere is checked at runtime** | yes (API key, service token) |
+| `http://` from the panel | manifest `network.domains` | Documented: **Premiere disallows `http://` on macOS** | no → the panel and engine exchange job files instead |
+| HTTPS to `api.anthropic.com` | `fetch` + `network.domains` | Documented | yes (Claude calls with your key) |
+| Read/write `~/ConsistentGrade` | `localFileSystem: "fullAccess"`, `require("fs")`, `os.homedir()` | Documented | yes (job files) |
+| Executable start script | `fs.writeFile(path, data, {mode: 0o755})` | Documented (`options.mode`) | yes |
+| Open the script / report | `uxp.shell.openPath()` + `launchProcess.extensions` (consent dialog) | Documented | yes |
+| Install by double-click | `.ccx` (ZIP, manifest at root) → Creative Cloud desktop | Documented | yes (`dist/ConsistentGrade.ccx`) |
+| Secret storage | `uxp.storage.secureStorage` | Documented UXP module | yes (API key) |
 | QE DOM / UI automation | — | Not used (undocumented; would need your approval) | no |
 
 ## Consequences for the MVP

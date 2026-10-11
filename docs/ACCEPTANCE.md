@@ -7,6 +7,7 @@ type before trusting the LUTs, and record the result at the bottom.
 
 1. Run `python -m tests.fixtures ./footage`, then:
    `python -m autograde analyze --input ./footage --reference a_reference.mp4 --output ./results`
+   (or run the same clips through the panel and use the job folder in `~/ConsistentGrade/jobs/`)
 2. Import `footage/b_dark_green.mp4` into a new **Rec.709** sequence of the same size and frame rate.
    Turn off display colour management for the comparison, or leave it on consistently on both sides.
 3. Apply Lumetri Color → Creative → Look → Browse… → `results/shot_002/grade.cube`.
@@ -27,17 +28,21 @@ type before trusting the LUTs, and record the result at the bottom.
    A uniform offset, or a shift only in the shadows, usually means a range mismatch (limited vs full).
    Note the fixtures are tagged limited range.
 
-## B. Panel workflow
+## B. Panel workflow (macOS)
 
-1. `python -m autograde serve`, copy the printed token into the panel and click Save. Paste your Anthropic
-   key, then Test key → Save key.
-2. Select 3–5 clips → **Read selected clips**. Check that the source in/out values are source-media seconds
-   (trim a clip's head and confirm `source_in` changes while `timeline_in` doesn't).
-3. Speed-change one clip, nest one, and add Lumetri to one. All three should be flagged and skipped.
-4. **Run capability test** and copy the table into the Results section below.
-5. Analyse (Claude off), check the previews, apply one LUT by hand, and tick Approved. `approvals.json`
-   should appear in the job folder.
-6. Repeat with Claude on, after agreeing that frames may be uploaded.
+1. Double-click `dist/ConsistentGrade.ccx` and confirm the install in Creative Cloud. Open
+   Window › UXP Plugins › Consistent Grade.
+2. **Start engine**: allow the prompt. Terminal opens and runs the first-time setup, and the panel then
+   shows "Engine: running".
+3. Paste your Anthropic key → Test key ("Key works") → Save key. Restart Premiere and confirm the key is
+   still saved.
+4. Select 3–5 clips → **Read selected clips**. Check that the source in/out values are source-media
+   seconds: trim a clip's head and confirm the source start changes while its timeline position doesn't.
+5. Speed-change one clip, nest one, and add Lumetri to one. All three should be flagged and skipped.
+6. **Run capability test** and copy the table into Results below.
+7. Analyse with Ask Claude off, check the previews, apply one LUT by hand (test A), and tick Approved.
+   `approvals.json` should appear in `~/ConsistentGrade/jobs/<job>/`.
+8. Repeat with Ask Claude on. The log should show "asking Claude (N images)" and the suggested look.
 
 ## Results
 

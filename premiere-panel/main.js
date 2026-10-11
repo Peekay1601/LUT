@@ -1,149 +1,193 @@
 /*
- * Consistent Grade — Premiere Pro UXP panel (Premiere 25.6+).
+ * Consistent Grade — Premiere Pro UXP panel (Premiere 25.6+, built for 26.5 on macOS).
  *
- * Uses only APIs found in Adobe's UXP Premiere reference/samples (see
- * docs/CAPABILITIES.md). Anything not documented is feature-detected at
- * runtime and reported by the capability test instead of being assumed.
+ * How it talks to the engine: Premiere blocks http:// on macOS, so there is no
+ * local server. The panel writes job files to ~/ConsistentGrade/jobs and the
+ * engine (a Python worker started from this panel) writes results back.
  *
- * This panel never modifies the sequence: it reads the selection, sends a
- * manifest to the local service, and shows where each LUT is so the editor
- * can apply it in Lumetri (guided manual application).
+ * Claude: the panel calls https://api.anthropic.com itself with the key stored
+ * in UXP secureStorage. The key never leaves Premiere except in that HTTPS call.
+ *
+ * Premiere APIs used are the documented UXP ones (see docs/CAPABILITIES.md).
+ * The panel never modifies the sequence.
  */
 const ppro = require("premierepro");
 const uxp = require("uxp");
-const fs = uxp.storage.localFileSystem;
+const fs = require("fs");
+const os = require("os");
+const { localFileSystem } = uxp.storage;
+const secure = uxp.storage.secureStorage;
 
-const SERVICE = "http://127.0.0.1:8765";
-const LUMETRI_CANDIDATES = ["AE.ADBE Lumetri"]; // verified at runtime via getMatchNames()
-
+const ANTHROPIC = "https://api.anthropic.com";
 const KEY_ITEM = "anthropic_api_key";
-const TOKEN_ITEM = "service_token";
+const HOME = os.homedir();
+const CG = `${HOME}/ConsistentGrade`;
+const JOBS = `${CG}/jobs`;
 
-const state = { manifest: null, referenceImage: null, lastJob: null, approvals: {}, apiKey: null, token: null };
+const state = { manifest: null, referenceImage: null, job: null, apiKey: null, approvals: {} };
 
 const $ = (id) => document.getElementById(id);
 function log(msg) {
-  const el = $("log");
-  el.textContent = `${new Date().toLocaleTimeString()}  ${msg}\n` + el.textContent;
+  $("log").textContent = `${new Date().toLocaleTimeString()}  ${msg}\n` + $("log").textContent;
 }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ---------------------------------------------------------------- service
-function api(path, init = {}) {
-  if (!state.token) throw new Error("Paste the service token (printed when you start `autograde serve`) and click Save");
-  return fetch(`${SERVICE}${path}`, { ...init, headers: { ...(init.headers || {}), "X-CG-Token": state.token } });
+// ---------------------------------------------------------------- small fs helpers
+async function exists(path) {
+  try { await fs.lstat(path); return true; } catch (e) { return false; }
 }
-async function apiJson(path, body) {
-  const r = await api(path, body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
-  if (r.status === 401) throw new Error("Service token rejected — paste the current token from the service console");
-  if (!r.ok) throw new Error(`service: ${r.status} ${await r.text()}`);
-  return r.json();
+async function readJson(path) {
+  try { return JSON.parse(await fs.readFile(path, { encoding: "utf-8" })); } catch (e) { return null; }
 }
-function resultUrl(path) {
-  return `${SERVICE}${path}?token=${encodeURIComponent(state.token)}`;
+async function writeJson(path, data) {
+  await fs.writeFile(path, JSON.stringify(data, null, 2), { encoding: "utf-8" });
+}
+function base64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  let i = 0;
+  for (; i + 2 < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + chars[(n >> 6) & 63] + chars[n & 63];
+  }
+  if (i < bytes.length) {
+    const n = (bytes[i] << 16) | ((i + 1 < bytes.length ? bytes[i + 1] : 0) << 8);
+    out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + (i + 1 < bytes.length ? chars[(n >> 6) & 63] : "=") + "=";
+  }
+  return out;
 }
 
-async function serviceHealth() {
-  try {
-    const r = await fetch(`${SERVICE}/health`);
-    const h = await r.json();
-    $("service-status").innerHTML = `Service: <span class="ok">v${esc(h.version)}</span>` +
-      (h.ffmpeg ? "" : ' <span class="err">ffmpeg missing</span>') +
-      (h.anthropic_key ? " · service has its own API key" : "");
-    return h;
-  } catch (e) {
-    $("service-status").innerHTML = `Service: <span class="err">not reachable at ${SERVICE}</span> — run <code>python -m autograde serve</code>. ` +
-      `If it is running, Premiere on macOS may be refusing plain http; see README (TLS).`;
-    return null;
+// ---------------------------------------------------------------- engine
+async function engineStatus() {
+  const hb = await readJson(`${CG}/worker.json`);
+  const alive = !!hb && Date.now() / 1000 - hb.time < 10;
+  $("engine-status").innerHTML = alive
+    ? `Engine: <span class="ok">running</span> (v${esc(hb.version)})${hb.ffmpeg ? "" : ' <span class="err">— ffmpeg missing</span>'}`
+    : 'Engine: <span class="warn">not running</span> — click <b>Start engine</b>';
+  return alive;
+}
+
+// Copies the engine shipped inside this plugin to ~/ConsistentGrade/engine and
+// writes an executable start script, then opens it (Terminal runs it).
+async function startEngine() {
+  const files = JSON.parse(await fs.readFile("plugin:/engine/files.json", { encoding: "utf-8" }));
+  await fs.mkdir(`${CG}/engine/autograde`, { recursive: true });
+  await fs.mkdir(JOBS, { recursive: true });
+  for (const rel of files) {
+    const data = await fs.readFile(`plugin:/engine/${rel}`);
+    await fs.writeFile(`${CG}/engine/${rel}`, data);
+  }
+  const script = `${CG}/Start Consistent Grade Engine.command`;
+  if (await exists(script)) await fs.unlink(script);
+  const text = await fs.readFile("plugin:/engine/start.command", { encoding: "utf-8" });
+  await fs.writeFile(script, text, { encoding: "utf-8", mode: 0o755 });
+  const res = await uxp.shell.openPath(script, "Starts the Consistent Grade engine in Terminal. The first run installs Python packages and FFmpeg (a few minutes).");
+  if (res) throw new Error(`could not open the start script: ${res}`);
+  log("engine starting in Terminal — the first run installs dependencies (a few minutes)");
+  for (let i = 0; i < 600; i++) {
+    if (await engineStatus()) return log("engine is running");
+    await sleep(1000);
   }
 }
 
 // ---------------------------------------------------------------- Claude API key
-// Stored with UXP secureStorage (OS-protected, per plugin) when the host provides
-// it; otherwise kept in memory for this session only. Never logged, never put in
-// the manifest; sent only to the local service on 127.0.0.1 with each analysis.
-const secure = uxp.storage.secureStorage;
-
-function maskKey(k) {
-  return k.length > 12 ? `${k.slice(0, 7)}…${k.slice(-4)}` : "••••";
-}
+function maskKey(k) { return k.length > 12 ? `${k.slice(0, 7)}…${k.slice(-4)}` : "••••"; }
 function decodeStored(v) {
   if (v == null) return null;
   if (typeof v === "string") return v;
-  return typeof TextDecoder !== "undefined" ? new TextDecoder().decode(v) : String.fromCharCode(...v);
+  let s = "";
+  for (const b of new Uint8Array(v)) s += String.fromCharCode(b);
+  return s;
 }
-function setKeyStatus(html) {
-  $("key-status").innerHTML = html;
-}
-
-async function loadSecret(item) {
-  if (!secure) return null;
-  try { return decodeStored(await secure.getItem(item)); } catch (e) { return null; }
-}
-
-async function saveToken() {
-  const t = ($("service-token").value || "").trim();
-  if (!t) throw new Error("Paste the service token first");
-  state.token = t;
-  $("service-token").value = "";
-  if (secure) await secure.setItem(TOKEN_ITEM, t);
-  log("service token saved");
+function anthropicHeaders(key) {
+  return {
+    "x-api-key": key,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "anthropic-dangerous-direct-browser-access": "true",
+  };
 }
 
 async function loadKey() {
-  state.token = await loadSecret(TOKEN_ITEM);
   if (!secure) {
-    setKeyStatus('<span class="warn">Secure storage is unavailable in this Premiere version; a key you enter is kept for this session only.</span>');
+    $("key-status").innerHTML = '<span class="warn">Secure storage unavailable: the key is kept for this session only.</span>';
     return;
   }
   try {
     const k = decodeStored(await secure.getItem(KEY_ITEM));
-    if (k) {
-      state.apiKey = k;
-      setKeyStatus(`Key saved (${esc(maskKey(k))}).`);
-    }
-  } catch (e) {
-    setKeyStatus("No key saved.");
-  }
+    if (k) { state.apiKey = k; $("key-status").textContent = `Key saved (${maskKey(k)}).`; }
+  } catch (e) { /* nothing stored */ }
 }
-
 async function saveKey() {
   const k = ($("api-key").value || "").trim();
-  if (!k) throw new Error("Paste your Anthropic API key first");
-  if (!k.startsWith("sk-ant-")) throw new Error("That doesn't look like an Anthropic API key (it should start with sk-ant-)");
+  if (!k.startsWith("sk-ant-")) throw new Error("Paste an Anthropic API key (it starts with sk-ant-)");
   state.apiKey = k;
   $("api-key").value = "";
-  if (secure) {
-    await secure.setItem(KEY_ITEM, k);
-    setKeyStatus(`Key saved securely (${esc(maskKey(k))}).`);
-  } else {
-    setKeyStatus(`Key kept for this session only (${esc(maskKey(k))}).`);
-  }
-  log("API key saved");
+  if (secure) await secure.setItem(KEY_ITEM, k);
+  $("key-status").textContent = `Key saved${secure ? " securely" : " for this session"} (${maskKey(k)}).`;
 }
-
-async function testKey() {
-  const typed = ($("api-key").value || "").trim();
-  const k = typed || state.apiKey;
-  if (!k) throw new Error("Enter or save a key first");
-  if (!(await serviceHealth())) return;
-  setKeyStatus("Checking key…");
-  const res = await apiJson("/ai/check-key", { api_key: k });
-  setKeyStatus(res.ok
-    ? `<span class="ok">Key works</span> — ${esc(res.display_name || res.model)} is available.${typed ? " Click Save key to keep it." : ""}`
-    : `<span class="err">${esc(res.error)}</span>`);
-}
-
 async function forgetKey() {
   state.apiKey = null;
-  $("api-key").value = "";
-  if (secure) await secure.removeItem(KEY_ITEM);
-  setKeyStatus("No key saved.");
-  log("API key removed");
+  if (secure) { try { await secure.removeItem(KEY_ITEM); } catch (e) { /* not stored */ } }
+  $("key-status").textContent = "No key saved.";
+}
+async function testKey() {
+  const k = ($("api-key").value || "").trim() || state.apiKey;
+  if (!k) throw new Error("Enter or save a key first");
+  $("key-status").textContent = "Checking…";
+  const model = "claude-opus-5-5";
+  const r = await fetch(`${ANTHROPIC}/v1/models/${model}`, { headers: anthropicHeaders(k) });
+  const msg = {
+    200: '<span class="ok">Key works.</span>',
+    401: '<span class="err">Key rejected (invalid or revoked).</span>',
+    403: `<span class="err">Key has no access to ${model}.</span>`,
+    404: `<span class="err">${model} is not available for this key.</span>`,
+  }[r.status] || `<span class="err">API error ${r.status}.</span>`;
+  $("key-status").innerHTML = msg + (r.status === 200 && $("api-key").value ? " Click Save key to keep it." : "");
+}
+
+// Sends the engine's prepared request (sample strips + measurements) to Claude
+// and writes the structured answer back for the engine.
+async function answerClaudeRequest(jobDir) {
+  const req = await readJson(`${jobDir}/ai/request.json`);
+  const content = [];
+  for (const img of req.images) {
+    const data = await fs.readFile(img.path);
+    const media = /\.png$/i.test(img.path) ? "image/png" : "image/jpeg";
+    content.push({ type: "text", text: img.label });
+    content.push({ type: "image", source: { type: "base64", media_type: media, data: base64(data) } });
+  }
+  content.push({ type: "text", text: req.text });
+  log(`asking Claude (${req.images.length} images)…`);
+  try {
+    const r = await fetch(`${ANTHROPIC}/v1/messages`, {
+      method: "POST",
+      headers: { ...anthropicHeaders(state.apiKey), "anthropic-beta": "server-side-fallback-2026-07-01" },
+      body: JSON.stringify({
+        model: req.model,
+        max_tokens: 16000,
+        system: req.system,
+        messages: [{ role: "user", content }],
+        output_config: { effort: "high", format: { type: "json_schema", schema: req.schema } },
+        fallbacks: "default",
+      }),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(`${r.status} ${body.error?.type || ""}: ${body.error?.message || ""}`);
+    if (body.stop_reason === "refusal") throw new Error("Claude declined to analyse these frames");
+    if (body.stop_reason === "max_tokens") throw new Error("Claude's answer was cut off");
+    const text = body.content.find((b) => b.type === "text")?.text;
+    const guidance = JSON.parse(text);
+    await writeJson(`${jobDir}/ai/guidance.json`, guidance);
+    log(`Claude suggests look: ${guidance.look?.preset} — ${guidance.look?.rationale || ""}`);
+  } catch (e) {
+    await writeJson(`${jobDir}/ai/failed.json`, { error: e.message });
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------- reading the timeline
@@ -152,16 +196,13 @@ async function readSelection() {
   if (!project) throw new Error("No active project");
   const sequence = await project.getActiveSequence();
   if (!sequence) throw new Error("No active sequence");
-  const selection = await sequence.getSelection();
-  const items = await selection.getTrackItems();
-  const settings = await sequence.getSettings();
-  const fps = settings.getVideoFrameRate().value;
+  const items = await (await sequence.getSelection()).getTrackItems();
+  const fps = (await sequence.getSettings()).getVideoFrameRate().value;
 
   const clips = [];
   for (const item of items) {
     if (!(item instanceof ppro.VideoClipTrackItem)) continue;
     const flags = [];
-    const name = await item.getName();
     const projectItem = await item.getProjectItem();
     const clipItem = ppro.ClipProjectItem.cast(projectItem);
     let sourcePath = "";
@@ -169,45 +210,28 @@ async function readSelection() {
       if (await clipItem.isSequence()) flags.push("nested_sequence");
       if (await clipItem.isOffline()) flags.push("offline");
       sourcePath = await clipItem.getMediaFilePath();
-      try {
-        const lutId = await clipItem.getInputLUTID();
-        if (lutId) flags.push("input_lut");
-      } catch (e) { /* not available in this version */ }
-    } else {
-      flags.push("missing_media");
+      try { if (await clipItem.getInputLUTID()) flags.push("input_lut"); } catch (e) { /* n/a */ }
     }
     if (!sourcePath) flags.push("missing_media");
     const speed = await item.getSpeed();
     if (Math.abs(speed - 1) > 1e-6) flags.push("speed_change");
     if (await item.isSpeedReversed()) flags.push("reversed");
     if (await item.isDisabled()) flags.push("disabled");
-
-    // Effects already on the clip. We record match names; Lumetri means an
-    // existing grade we cannot reproduce from the source file.
     const effects = [];
     const chain = await item.getComponentChain();
-    const n = chain.getComponentCount();
-    for (let i = 0; i < n; i++) {
-      const comp = chain.getComponentAtIndex(i);
-      effects.push(await comp.getMatchName());
-    }
+    for (let i = 0; i < chain.getComponentCount(); i++) effects.push(await chain.getComponentAtIndex(i).getMatchName());
     if (effects.some((m) => /lumetri/i.test(m))) flags.push("existing_grade");
-
-    const inPt = await item.getInPoint();
-    const outPt = await item.getOutPoint();
     const start = await item.getStartTime();
-    const end = await item.getEndTime();
+    const trackIndex = await item.getTrackIndex();
     clips.push({
-      shot_id: `shot_${String(clips.length + 1).padStart(3, "0")}`,
-      clip_id: `${await item.getTrackIndex()}:${start.ticks}`,
-      name,
+      clip_id: `${trackIndex}:${start.ticks}`,
+      name: await item.getName(),
       source_path: sourcePath,
-      // Source time (media seconds) vs. timeline time (sequence seconds) are kept separate.
-      source_in: inPt.seconds,
-      source_out: outPt.seconds,
-      timeline_in: start.seconds,
-      timeline_out: end.seconds,
-      track_index: await item.getTrackIndex(),
+      source_in: (await item.getInPoint()).seconds,   // media time
+      source_out: (await item.getOutPoint()).seconds,
+      timeline_in: start.seconds,                      // sequence time
+      timeline_out: (await item.getEndTime()).seconds,
+      track_index: trackIndex,
       speed,
       existing_effects: effects,
       flags,
@@ -216,158 +240,133 @@ async function readSelection() {
   clips.sort((a, b) => a.timeline_in - b.timeline_in || a.track_index - b.track_index);
   clips.forEach((c, i) => (c.shot_id = `shot_${String(i + 1).padStart(3, "0")}`));
   return {
-    version: 1,
-    source: "premiere-uxp",
+    version: 1, source: "premiere-uxp",
     grading_basis: "clean source media (effects and colour transforms applied in Premiere are NOT seen)",
-    sequence: { name: await sequence.name, fps, timebase: await sequence.getTimebase() },
+    sequence: { fps, timebase: await sequence.getTimebase() },
     clips,
   };
 }
 
-function renderClips(manifest) {
-  const rows = manifest.clips.map((c) => {
-    const f = c.flags.length ? `<span class="warn">${esc(c.flags.join(", "))}</span>` : '<span class="ok">ok</span>';
-    return `<tr><td>${esc(c.shot_id)}</td><td>${esc(c.name)}<div class="muted">${c.source_in.toFixed(2)}–${c.source_out.toFixed(2)}s src</div></td><td>${f}</td></tr>`;
-  });
-  $("clips").innerHTML = manifest.clips.length
-    ? `<table>${rows.join("")}</table><div class="muted">Flagged clips (speed, reversed, nested, input LUT, existing Lumetri…) are skipped by the MVP.</div>`
+function renderClips(m) {
+  $("clips").innerHTML = m.clips.length
+    ? `<table>${m.clips.map((c) => `<tr><td>${esc(c.shot_id)}</td><td>${esc(c.name)}<div class="muted">${c.source_in.toFixed(2)}–${c.source_out.toFixed(2)}s</div></td><td>${
+        c.flags.length ? `<span class="warn">${esc(c.flags.join(", "))}</span>` : '<span class="ok">ok</span>'}</td></tr>`).join("")}</table>
+       <div class="muted">Flagged clips are skipped (speed change, reverse, nested, input LUT, existing Lumetri…).</div>`
     : "No video clips selected on the timeline.";
-  const menu = $("ref-picker").querySelector("sp-menu");
-  menu.innerHTML = '<sp-menu-item value="">Most typical shot</sp-menu-item>' +
-    manifest.clips.map((c) => `<sp-menu-item value="${esc(c.shot_id)}">${esc(c.shot_id)} · ${esc(c.name)}</sp-menu-item>`).join("");
+  $("ref-menu").innerHTML = '<sp-menu-item value="">Most typical shot</sp-menu-item>' +
+    m.clips.map((c) => `<sp-menu-item value="${esc(c.shot_id)}">${esc(c.shot_id)} · ${esc(c.name)}</sp-menu-item>`).join("");
 }
 
 // ---------------------------------------------------------------- analysis
 async function analyze() {
   if (!state.manifest) throw new Error("Read selected clips first");
-  if (!(await serviceHealth())) return;
+  if (!(await engineStatus())) throw new Error("Start the engine first");
   const look = $("look-picker").value || "none";
-  const aiAllowed = $("ai-allowed").checked;
-  if (look === "ai" && !aiAllowed) throw new Error("'Let Claude suggest' needs permission to send frames to Claude");
-  if (aiAllowed && !state.apiKey) throw new Error("Save your Claude API key above (or untick 'Send … to Claude')");
-  const options = {
-    reference: state.referenceImage || $("ref-picker").value || null,
-    look,
-    ai_mode: aiAllowed ? "api" : "off",
-  };
-  log(`analysing ${state.manifest.clips.length} clip(s)…`);
-  const { job_id } = await apiJson("/analyze", {
-    manifest: state.manifest, options, api_key: aiAllowed ? state.apiKey : null,
+  const useClaude = $("ai-allowed").checked;
+  if (look === "ai" && !useClaude) throw new Error("'Let Claude suggest' needs the Ask Claude box ticked");
+  if (useClaude && !state.apiKey) throw new Error("Save your Claude API key first");
+  const id = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14) + "_" + Math.random().toString(36).slice(2, 6);
+  const dir = `${JOBS}/${id}`;
+  await fs.mkdir(dir, { recursive: true });
+  await writeJson(`${dir}/request.json`, {
+    manifest: state.manifest,
+    options: { reference: state.referenceImage || $("ref-picker").value || null, look, ai_mode: useClaude ? "panel" : "off" },
   });
-  state.lastJob = job_id;
+  state.job = dir;
   state.approvals = {};
   $("btn-cancel").disabled = false;
+  $("results").innerHTML = "";
+  log(`job ${id} queued`);
   let seen = 0;
+  let asked = false;
   try {
     for (;;) {
-      await new Promise((res) => setTimeout(res, 1000));
-      const job = await apiJson(`/jobs/${job_id}`);
-      job.log.slice(seen).forEach((l) => log(l));
-      seen = job.log.length;
-      $("progress").value = Math.round(100 * (job.progress || 0));
-      $("stage").textContent = job.stage || "";
-      if (job.status === "done") return renderResults(job);
-      if (job.status === "cancelled") return log("analysis cancelled");
-      if (job.status === "error") throw new Error(job.error);
+      await sleep(800);
+      const st = await readJson(`${dir}/status.json`);
+      if (!st) continue;
+      st.log.slice(seen).forEach((l) => log(l));
+      seen = st.log.length;
+      $("progress").value = Math.round(100 * (st.progress || 0));
+      $("stage").textContent = st.stage || "";
+      if (useClaude && !asked && (await exists(`${dir}/ai/request.json`))) {
+        asked = true;
+        $("stage").textContent = "waiting for Claude…";
+        await answerClaudeRequest(dir);
+      }
+      if (st.status === "done") return renderResults(st.summary);
+      if (st.status === "cancelled") return log("cancelled");
+      if (st.status === "error") throw new Error(st.error);
     }
   } finally {
     $("btn-cancel").disabled = true;
   }
 }
 
-function renderResults(job) {
-  const s = job.summary;
+function fileUrl(p) { return "file:" + p; }
+
+function renderResults(s) {
   $("btn-report").disabled = false;
   const c = s.consistency;
   const cards = s.shots.map((shot) => {
     if (shot.status !== "ok") {
-      return `<div class="card"><b>${esc(shot.shot_id)}</b> ${esc(shot.name)} — <span class="warn">${esc(shot.status)}</span><div class="muted">${esc(shot.warnings.join("; "))}</div></div>`;
+      return `<div class="card"><b>${esc(shot.shot_id)}</b> ${esc(shot.name)} — <span class="warn">skipped</span><div class="muted">${esc(shot.warnings.join("; "))}</div></div>`;
     }
     const g = shot.grade;
-    const badge = g.needs_review ? '<span class="warn">needs review</span>' : '<span class="ok">ok</span>';
     return `<div class="card">
-      <b>${esc(shot.shot_id)}</b> ${esc(shot.name)} ${badge}
-      <div class="muted">${g.exposure_ev >= 0 ? "+" : ""}${g.exposure_ev} EV · RGB ${g.rgb_balance.join(" / ")} · con ${g.contrast} · sat ${g.saturation}</div>
-      ${shot.preview ? `<img class="preview" src="${resultUrl(shot.preview)}">` : ""}
-      <div>LUT: <code>${esc(shot.grade_cube)}</code></div>
+      <b>${esc(shot.shot_id)}</b> ${esc(shot.name)} ${g.needs_review ? '<span class="warn">needs review</span>' : '<span class="ok">ok</span>'}
+      <div class="muted">${g.exposure_ev >= 0 ? "+" : ""}${g.exposure_ev} EV · RGB ${g.rgb_balance.join(" / ")} · contrast ${g.contrast} · sat ${g.saturation}</div>
+      ${shot.preview ? `<img class="preview" src="${esc(fileUrl(shot.preview))}">` : ""}
+      ${g.needs_review ? `<div class="warn">${esc(shot.reasons.slice(-2).join("; "))}</div>` : ""}
       <div class="row">
         <sp-button size="s" variant="secondary" data-copy="${esc(shot.grade_cube)}">Copy LUT path</sp-button>
-        <sp-checkbox data-approve="${esc(shot.shot_id)}" ${state.approvals[shot.shot_id] ? "checked" : ""}>Approved</sp-checkbox>
+        <sp-checkbox data-approve="${esc(shot.shot_id)}">Approved</sp-checkbox>
       </div>
     </div>`;
   });
-  $("results").innerHTML = `<div class="muted">Distance to reference: ${c.mean_to_reference_before} → ${c.mean_to_reference_after} · look: ${esc(s.look)}</div>
-    <div class="muted">Reference:</div><img class="preview" src="${resultUrl(s.reference_preview)}">
-    <div class="muted">This panel never changes your sequence, so there is nothing to revert: remove a LUT in Lumetri (or Edit › Undo) to undo a manual application.</div>
-    <div class="card"><b>Apply manually</b> (no supported API sets Lumetri LUT paths):
-      select the clip → Lumetri Color → Creative → Look → Browse… → paste the copied path.
-      Do not use it as an Input LUT on clips that already have one.</div>` + cards.join("");
-  document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+  $("results").innerHTML = `
+    <div class="muted">Difference from reference: ${c.mean_to_reference_before} → ${c.mean_to_reference_after} · look: ${esc(s.look)}</div>
+    <div class="muted">Reference</div><img class="preview" src="${esc(fileUrl(s.reference_preview))}">
+    <div class="card"><b>Apply each LUT:</b> select the clip → Lumetri Color → Creative → Look → Browse… → press ⌘⇧G and paste the copied path.
+      The panel never changes your sequence; remove the Look in Lumetri to undo.</div>` + cards.join("");
+  document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", guard(async () => {
     await navigator.clipboard.setContent({ "text/plain": b.dataset.copy });
     log(`copied ${b.dataset.copy}`);
-  }));
+  })));
   document.querySelectorAll("[data-approve]").forEach((cb) => cb.addEventListener("change", guard(async () => {
     state.approvals[cb.dataset.approve] = cb.checked;
-    await apiJson(`/jobs/${state.lastJob}/approvals`, { [cb.dataset.approve]: cb.checked });
-    log(`${cb.dataset.approve} ${cb.checked ? "approved" : "unapproved"} (saved to approvals.json)`);
+    await writeJson(`${state.job}/approvals.json`, state.approvals);
   })));
 }
 
-// ---------------------------------------------------------------- capability test
+// ---------------------------------------------------------------- diagnostics
 async function capabilityTest() {
   const rows = [];
-  const add = (name, status, detail = "") => rows.push({ name, status, detail });
   const check = async (name, fn) => {
-    try {
-      const d = await fn();
-      add(name, d === false ? "missing" : "ok", d === true || d === undefined ? "" : String(d));
-    } catch (e) {
-      add(name, "error", e.message);
-    }
+    try { const d = await fn(); rows.push([name, d === false ? "missing" : "ok", d === true || d == null ? "" : String(d)]); }
+    catch (e) { rows.push([name, "error", e.message]); }
   };
-  await check("premierepro module", () => !!ppro);
-  await check("active project / sequence", async () => {
-    const p = await ppro.Project.getActiveProject();
-    const s = p && (await p.getActiveSequence());
-    return s ? `sequence '${await s.name}'` : false;
+  await check("active sequence", async () => !!(await (await ppro.Project.getActiveProject()).getActiveSequence()));
+  await check("timeline selection", async () => {
+    const s = await (await ppro.Project.getActiveProject()).getActiveSequence();
+    return `${(await (await s.getSelection()).getTrackItems()).length} item(s)`;
   });
-  await check("timeline selection (getSelection)", async () => {
-    const p = await ppro.Project.getActiveProject();
-    const s = await p.getActiveSequence();
-    const items = await (await s.getSelection()).getTrackItems();
-    return `${items.length} item(s) selected`;
-  });
-  await check("Lumetri effect available", async () => {
-    const names = await ppro.VideoFilterFactory.getMatchNames();
-    const hit = names.filter((n) => /lumetri/i.test(n));
+  await check("Lumetri effect present", async () => {
+    const hit = (await ppro.VideoFilterFactory.getMatchNames()).filter((n) => /lumetri/i.test(n));
     return hit.length ? hit.join(", ") : false;
   });
-  await check("frame export (Exporter.exportSequenceFrame)", () => typeof ppro.Exporter?.exportSequenceFrame === "function");
-  await check("undoable transactions (executeTransaction)", async () => {
-    const p = await ppro.Project.getActiveProject();
-    return typeof p.executeTransaction === "function";
-  });
-  await check("source Input LUT action (createSetInputLUTIDAction)", () =>
-    typeof ppro.ClipProjectItem?.prototype?.createSetInputLUTIDAction === "function" || "not detectable on prototype");
-  add("set Lumetri Look/LUT file path", "unsupported", "no documented API — LUTs are applied manually");
-  await check("local service", async () => ((await serviceHealth()) ? `reachable at ${SERVICE}` : false));
-  await check("service token accepted", async () => { await apiJson("/jobs/none").catch((e) => { if (/token/.test(e.message)) throw e; }); return true; });
-  add("secure key storage (uxp.storage.secureStorage)", secure ? "ok" : "missing", secure ? "" : "keys are kept for the session only");
-
-  $("probe").innerHTML = `<table>${rows.map((r) =>
-    `<tr><td>${esc(r.name)}</td><td class="${r.status === "ok" ? "ok" : r.status === "unsupported" ? "muted" : "warn"}">${esc(r.status)}</td><td class="muted">${esc(r.detail)}</td></tr>`
-  ).join("")}</table>`;
-  log("capability test finished");
+  await check("frame export API", () => typeof ppro.Exporter?.exportSequenceFrame === "function");
+  await check("write ~/ConsistentGrade", async () => { await fs.mkdir(JOBS, { recursive: true }); await writeJson(`${CG}/.probe.json`, { t: Date.now() }); return CG; });
+  await check("secure key storage", () => !!secure);
+  await check("engine running", engineStatus);
+  await check("api.anthropic.com reachable", async () => `HTTP ${(await fetch(`${ANTHROPIC}/v1/models`)).status}`);
+  rows.push(["set Lumetri LUT path automatically", "unsupported", "no documented API — apply manually"]);
+  $("probe").innerHTML = `<table>${rows.map(([n, s, d]) => `<tr><td>${esc(n)}</td><td class="${s === "ok" ? "ok" : s === "unsupported" ? "muted" : "warn"}">${esc(s)}</td><td class="muted">${esc(d)}</td></tr>`).join("")}</table>`;
 }
 
-// Read-only: lists the parameters of a Lumetri instance on the first selected
-// clip so we can learn (per Premiere version) what automation could address.
 async function inspectLumetri() {
-  const p = await ppro.Project.getActiveProject();
-  const s = await p.getActiveSequence();
-  const items = await (await s.getSelection()).getTrackItems();
-  const item = items.find((i) => i instanceof ppro.VideoClipTrackItem);
-  if (!item) throw new Error("Select a clip that already has Lumetri Color applied");
+  const s = await (await ppro.Project.getActiveProject()).getActiveSequence();
+  const item = (await (await s.getSelection()).getTrackItems()).find((i) => i instanceof ppro.VideoClipTrackItem);
+  if (!item) throw new Error("Select a clip that has Lumetri Color applied");
   const chain = await item.getComponentChain();
   for (let i = 0; i < chain.getComponentCount(); i++) {
     const comp = chain.getComponentAtIndex(i);
@@ -375,42 +374,21 @@ async function inspectLumetri() {
     if (!/lumetri/i.test(match)) continue;
     const lines = [];
     for (let k = 0; k < comp.getParamCount(); k++) {
-      const param = comp.getParam(k);
-      let value = "";
-      try { value = JSON.stringify((await param.getStartValue()).value.value); } catch (e) { value = "(unreadable)"; }
-      lines.push(`${k}\t${param.displayName}\t${value}`);
+      const p = comp.getParam(k);
+      let v = "";
+      try { v = JSON.stringify((await p.getStartValue()).value.value); } catch (e) { v = "?"; }
+      lines.push(`${k}\t${p.displayName}\t${v}`);
     }
-    log(`Lumetri (${match}) has ${lines.length} params:\n${lines.join("\n")}`);
-    return;
+    return log(`Lumetri (${match}) — ${lines.length} params:\n${lines.join("\n")}`);
   }
-  throw new Error("No Lumetri Color effect on the selected clip");
+  throw new Error("No Lumetri Color on the selected clip");
 }
 
 // ---------------------------------------------------------------- wiring
 function guard(fn) {
-  return async () => {
-    try { await fn(); } catch (e) { log(`error: ${e.message}`); }
-  };
+  return async () => { try { await fn(); } catch (e) { log(`error: ${e.message}`); } };
 }
-
-$("btn-token-save").addEventListener("click", guard(saveToken));
-$("btn-cancel").addEventListener("click", guard(async () => {
-  if (state.lastJob) await apiJson(`/jobs/${state.lastJob}/cancel`, {});
-}));
-$("btn-ref-selected").addEventListener("click", guard(async () => {
-  if (!state.manifest) throw new Error("Read selected clips first");
-  const p = await ppro.Project.getActiveProject();
-  const s = await p.getActiveSequence();
-  const items = await (await s.getSelection()).getTrackItems();
-  const item = items.find((i) => i instanceof ppro.VideoClipTrackItem);
-  if (!item) throw new Error("Select one clip on the timeline to use as the reference");
-  const id = `${await item.getTrackIndex()}:${(await item.getStartTime()).ticks}`;
-  const clip = state.manifest.clips.find((c) => c.clip_id === id);
-  if (!clip) throw new Error("That clip is not in the analysed set — include it in 'Read selected clips' first");
-  $("ref-picker").value = clip.shot_id;
-  state.referenceImage = null;
-  $("ref-image-label").textContent = `Reference: ${clip.shot_id} · ${clip.name}`;
-}));
+$("btn-engine").addEventListener("click", guard(startEngine));
 $("btn-key-save").addEventListener("click", guard(saveKey));
 $("btn-key-test").addEventListener("click", guard(testKey));
 $("btn-key-forget").addEventListener("click", guard(forgetKey));
@@ -419,25 +397,34 @@ $("btn-read").addEventListener("click", guard(async () => {
   renderClips(state.manifest);
   log(`read ${state.manifest.clips.length} clip(s)`);
 }));
-$("btn-export-manifest").addEventListener("click", guard(async () => {
+$("btn-ref-selected").addEventListener("click", guard(async () => {
   if (!state.manifest) throw new Error("Read selected clips first");
-  const file = await fs.getFileForSaving("consistent-grade-manifest.json", { types: ["json"] });
-  if (!file) return;
-  await file.write(JSON.stringify(state.manifest, null, 2));
-  log(`manifest saved: ${file.nativePath} — run: python -m autograde analyze --manifest "${file.nativePath}" --output <folder>`);
+  const s = await (await ppro.Project.getActiveProject()).getActiveSequence();
+  const item = (await (await s.getSelection()).getTrackItems()).find((i) => i instanceof ppro.VideoClipTrackItem);
+  if (!item) throw new Error("Select the reference clip on the timeline");
+  const id = `${await item.getTrackIndex()}:${(await item.getStartTime()).ticks}`;
+  const clip = state.manifest.clips.find((c) => c.clip_id === id);
+  if (!clip) throw new Error("That clip isn't in the clips you read — include it first");
+  $("ref-picker").value = clip.shot_id;
+  state.referenceImage = null;
+  $("ref-label").textContent = `Reference: ${clip.shot_id} · ${clip.name}`;
 }));
 $("btn-ref-image").addEventListener("click", guard(async () => {
-  const file = await fs.getFileForOpening({ types: ["jpg", "jpeg", "png", "tif", "tiff"] });
-  if (!file) return;
-  state.referenceImage = file.nativePath;
-  $("ref-image-label").textContent = `Reference image: ${file.nativePath} (overrides shot choice)`;
+  const f = await localFileSystem.getFileForOpening({ types: ["jpg", "jpeg", "png", "tif", "tiff"] });
+  if (!f) return;
+  state.referenceImage = f.nativePath;
+  $("ref-label").textContent = `Reference image: ${f.nativePath}`;
 }));
 $("btn-analyze").addEventListener("click", guard(analyze));
+$("btn-cancel").addEventListener("click", guard(async () => {
+  if (state.job) await fs.writeFile(`${state.job}/cancel`, "1", { encoding: "utf-8" });
+}));
 $("btn-report").addEventListener("click", guard(async () => {
-  await uxp.shell.openExternal(resultUrl(`/results/${state.lastJob}/report.html`), "Open the Consistent Grade report");
+  await uxp.shell.openPath(`${state.job}/report.html`, "Opens the Consistent Grade report in your browser");
 }));
 $("btn-probe").addEventListener("click", guard(capabilityTest));
 $("btn-lumetri").addEventListener("click", guard(inspectLumetri));
 
 loadKey();
-serviceHealth();
+engineStatus();
+setInterval(engineStatus, 5000);

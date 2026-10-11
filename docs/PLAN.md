@@ -4,8 +4,8 @@
 
 | Question from the brief | Assumption used | Change if… |
 |---|---|---|
-| Operating system | either. The panel is UXP, the service is cross-platform | macOS + http is refused → use the TLS option |
-| Premiere version | 25.6+ (UXP GA) | older → a CEP/ExtendScript panel is needed instead |
+| Operating system | **macOS Tahoe 26.5** (confirmed). The panel and engine exchange job files because Premiere blocks http on macOS | — |
+| Premiere version | **26.5.2** (confirmed); the manifest requires 25.6+ | — |
 | Footage | SDR Rec.709 only | log/RAW → add OCIO input normalisation first |
 | Matching or look | both. Matching first; the look is a separate, optional layer | — |
 | Frames to cloud AI | **off by default**. Opt-in checkbox in the panel and `--ai api` in the CLI | — |
@@ -18,7 +18,8 @@
 | 2 | Conservative correction → matching → graded previews | done, tested on synthetic footage | `pytest tests/test_pipeline.py tests/test_spec.py` |
 | 3 | Optional AI interpretation (provider interface: Anthropic / file / prepare / mock) | done; **live API untested here** (no key in the build environment) | `--ai mock`, `--ai prepare`, `--ai api` |
 | 4 | Premiere capability spike | panel capability test written; **not run on Premiere** | panel → Run capability test |
-| 5 | Panel → service → export / guided apply | written; **not run on Premiere** | docs/ACCEPTANCE.md |
+| 5 | Panel → engine → export / guided apply | written and exercised by `tests/panel/harness.js`; **not run on Premiere** | docs/ACCEPTANCE.md |
+| 6 | Double-click install (`.ccx`) + one-click engine start | built (`dist/ConsistentGrade.ccx`); **install not yet tried on a Mac** | `python packaging/build_ccx.py` |
 
 ## Next steps
 

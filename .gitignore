@@ -6,3 +6,6 @@ results/
 footage/
 .cache/
 service-token
+build/
+node_modules/
+package-lock.json

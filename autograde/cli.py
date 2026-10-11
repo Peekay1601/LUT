@@ -41,6 +41,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="decoded-frame cache ('' to disable)")
     a.add_argument("--json", action="store_true", help="print project.json summary to stdout")
 
+    w = sub.add_parser("worker", help="run the file-based engine used by the Premiere panel")
+    w.add_argument("--home", type=Path, default=Path.home() / "ConsistentGrade")
+    w.add_argument("--once", action="store_true", help="process pending jobs and exit")
+
     s = sub.add_parser("serve", help="run the local HTTP service used by the Premiere panel")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
@@ -54,6 +58,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.cmd == "worker":
+        from .worker import serve_folder
+        serve_folder(args.home, once=args.once)
+        return 0
     if args.cmd == "serve":
         from .service import serve
         serve(args.host, args.port, args.workdir, args.certfile, args.keyfile, args.allow_origin)

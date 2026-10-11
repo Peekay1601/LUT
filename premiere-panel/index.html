@@ -6,10 +6,12 @@
 </head>
 <body>
   <sp-heading size="S">Consistent Grade</sp-heading>
-  <div class="muted" id="service-status">Service: not checked</div>
+
   <div class="row">
-    <sp-textfield id="service-token" type="password" placeholder="Service token (printed by autograde serve)" size="s" style="flex:1"></sp-textfield>
-    <sp-button id="btn-token-save" variant="secondary" size="s">Save</sp-button>
+    <span id="engine-status" class="muted">Engine: checking…</span>
+  </div>
+  <div class="row">
+    <sp-button id="btn-engine" variant="primary" size="s">Start engine</sp-button>
   </div>
 
   <h2>Claude API key</h2>
@@ -26,17 +28,18 @@
   <h2>1 · Clips</h2>
   <div class="row">
     <sp-button id="btn-read" variant="primary">Read selected clips</sp-button>
-    <sp-button id="btn-export-manifest" variant="secondary">Save manifest…</sp-button>
   </div>
-  <div id="clips" class="muted">No clips read yet.</div>
+  <div id="clips" class="muted">Select clips on the timeline, then click Read.</div>
 
   <h2>2 · Reference &amp; look</h2>
   <div class="row">
-    <sp-picker id="ref-picker" label="Reference" size="s"><sp-menu slot="options"><sp-menu-item value="">Most typical shot</sp-menu-item></sp-menu></sp-picker>
+    <sp-picker id="ref-picker" label="Reference" size="s"><sp-menu slot="options" id="ref-menu"><sp-menu-item value="">Most typical shot</sp-menu-item></sp-menu></sp-picker>
+  </div>
+  <div class="row">
     <sp-button id="btn-ref-selected" variant="secondary" size="s">Use selected clip</sp-button>
     <sp-button id="btn-ref-image" variant="secondary" size="s">Reference image…</sp-button>
   </div>
-  <div class="muted" id="ref-image-label"></div>
+  <div class="muted" id="ref-label"></div>
   <div class="row">
     <sp-picker id="look-picker" label="Look" size="s">
       <sp-menu slot="options">
@@ -50,7 +53,7 @@
     </sp-picker>
   </div>
   <div class="row">
-    <sp-checkbox id="ai-allowed">Send downscaled sample frames to Claude (Anthropic API)</sp-checkbox>
+    <sp-checkbox id="ai-allowed">Ask Claude (sends small still frames, not video)</sp-checkbox>
   </div>
 
   <h2>3 · Analyse</h2>
