@@ -1,0 +1,13 @@
+body { font-family: sans-serif; font-size: 12px; color: var(--uxp-host-text-color, #ddd); background: var(--uxp-host-background-color, #232323); margin: 0; padding: 8px; }
+h2 { font-size: 13px; margin: 14px 0 6px; }
+.row { display: flex; gap: 6px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
+.muted { color: #9a9a9a; }
+.warn { color: #ffb84d; }
+.err { color: #ff7b72; }
+.ok { color: #6fd39b; }
+.card { border: 1px solid #3a3a3a; border-radius: 6px; padding: 8px; margin: 6px 0; }
+table { border-collapse: collapse; width: 100%; }
+td { padding: 2px 4px; border-bottom: 1px solid #333; vertical-align: top; }
+#log { white-space: pre-wrap; font-family: monospace; font-size: 11px; max-height: 160px; overflow: auto; background: #1b1b1b; padding: 6px; border-radius: 4px; }
+img.preview { width: 100%; border-radius: 4px; margin-top: 4px; }
+code { font-size: 11px; word-break: break-all; }

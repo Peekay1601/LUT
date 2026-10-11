@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "consistent-grade"
+version = "0.1.0"
+description = "Shot matching, stable per-shot grades and LUT export for Premiere Pro"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "opencv-python-headless>=4.9",
+  "pillow>=10",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "anthropic>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+autograde = "autograde.cli:main"
+
+[tool.setuptools]
+packages = ["autograde"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

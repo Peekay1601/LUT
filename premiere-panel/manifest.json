@@ -1,0 +1,28 @@
+{
+  "id": "com.consistentgrade.panel",
+  "name": "Consistent Grade",
+  "version": "0.1.0",
+  "main": "index.html",
+  "manifestVersion": 5,
+  "host": { "app": "premierepro", "minVersion": "25.6.0" },
+  "requiredPermissions": {
+    "localFileSystem": "request",
+    "clipboard": "readAndWrite",
+    "network": { "domains": ["http://127.0.0.1:8765", "https://127.0.0.1:8765", "http://localhost:8765", "https://localhost:8765"] },
+    "launchProcess": { "schemes": ["http", "https"], "extensions": [] }
+  },
+  "entrypoints": [
+    {
+      "id": "consistentgrade",
+      "type": "panel",
+      "label": { "default": "Consistent Grade" },
+      "minimumSize": { "width": 320, "height": 400 },
+      "maximumSize": { "width": 2000, "height": 2000 },
+      "preferredDockedSize": { "width": 360, "height": 600 },
+      "preferredFloatingSize": { "width": 420, "height": 700 },
+      "icons": [
+        { "width": 23, "height": 23, "path": "icons/icon.svg", "scale": [1, 2], "theme": ["darkest", "dark", "medium", "light", "lightest"] }
+      ]
+    }
+  ]
+}

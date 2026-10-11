@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <sp-heading size="S">Consistent Grade</sp-heading>
+  <div class="muted" id="service-status">Service: not checked</div>
+  <div class="row">
+    <sp-textfield id="service-token" type="password" placeholder="Service token (printed by autograde serve)" size="s" style="flex:1"></sp-textfield>
+    <sp-button id="btn-token-save" variant="secondary" size="s">Save</sp-button>
+  </div>
+
+  <h2>Claude API key</h2>
+  <div class="row">
+    <sp-textfield id="api-key" type="password" placeholder="sk-ant-…" size="s" style="flex:1"></sp-textfield>
+  </div>
+  <div class="row">
+    <sp-button id="btn-key-save" variant="primary" size="s">Save key</sp-button>
+    <sp-button id="btn-key-test" variant="secondary" size="s">Test key</sp-button>
+    <sp-button id="btn-key-forget" variant="secondary" size="s">Forget key</sp-button>
+  </div>
+  <div class="muted" id="key-status">No key saved.</div>
+
+  <h2>1 · Clips</h2>
+  <div class="row">
+    <sp-button id="btn-read" variant="primary">Read selected clips</sp-button>
+    <sp-button id="btn-export-manifest" variant="secondary">Save manifest…</sp-button>
+  </div>
+  <div id="clips" class="muted">No clips read yet.</div>
+
+  <h2>2 · Reference &amp; look</h2>
+  <div class="row">
+    <sp-picker id="ref-picker" label="Reference" size="s"><sp-menu slot="options"><sp-menu-item value="">Most typical shot</sp-menu-item></sp-menu></sp-picker>
+    <sp-button id="btn-ref-selected" variant="secondary" size="s">Use selected clip</sp-button>
+    <sp-button id="btn-ref-image" variant="secondary" size="s">Reference image…</sp-button>
+  </div>
+  <div class="muted" id="ref-image-label"></div>
+  <div class="row">
+    <sp-picker id="look-picker" label="Look" size="s">
+      <sp-menu slot="options">
+        <sp-menu-item value="none" selected>Match only (no look)</sp-menu-item>
+        <sp-menu-item value="natural_commercial">Natural commercial</sp-menu-item>
+        <sp-menu-item value="warm_documentary">Warm documentary</sp-menu-item>
+        <sp-menu-item value="muted_cinematic">Muted cinematic</sp-menu-item>
+        <sp-menu-item value="clean_product">Clean product</sp-menu-item>
+        <sp-menu-item value="ai">Let Claude suggest</sp-menu-item>
+      </sp-menu>
+    </sp-picker>
+  </div>
+  <div class="row">
+    <sp-checkbox id="ai-allowed">Send downscaled sample frames to Claude (Anthropic API)</sp-checkbox>
+  </div>
+
+  <h2>3 · Analyse</h2>
+  <div class="row">
+    <sp-button id="btn-analyze" variant="cta">Analyse &amp; build LUTs</sp-button>
+    <sp-button id="btn-cancel" variant="secondary" disabled>Cancel</sp-button>
+    <sp-button id="btn-report" variant="secondary" disabled>Open report</sp-button>
+  </div>
+  <sp-progressbar id="progress" max="100" value="0" style="width:100%"></sp-progressbar>
+  <div class="muted" id="stage"></div>
+  <div id="results"></div>
+
+  <h2>Diagnostics</h2>
+  <div class="row">
+    <sp-button id="btn-probe" variant="secondary" size="s">Run capability test</sp-button>
+    <sp-button id="btn-lumetri" variant="secondary" size="s">Inspect Lumetri params</sp-button>
+  </div>
+  <div id="probe"></div>
+  <div id="log"></div>
+
+  <script src="main.js"></script>
+</body>
+</html>

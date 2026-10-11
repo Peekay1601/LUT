@@ -1,0 +1,47 @@
+# Premiere integration capability matrix
+
+Target: **Premiere Pro 25.6+ with UXP plugins** (UXP is GA from 25.6.0; 25.2 was the public beta).
+Sources: Adobe's UXP Premiere reference (`developer.adobe.com/premiere-pro/uxp/ppro-reference/`, repo
+`AdobeDocs/uxp-premiere-pro`, checked 2026-10-11) and `AdobeDocs/uxp-premiere-pro-samples`.
+
+Legend: **Documented** = in the reference or an official sample · **Verified** = observed working in a real
+Premiere install · **Unsupported** = no documented API; not used.
+
+Nothing below is marked *Verified* yet. This repository was built without access to Premiere. Run the
+panel's **Run capability test** and [ACCEPTANCE.md](ACCEPTANCE.md) on your install, then update this table.
+
+| Capability | API | Status | Used by the panel |
+|---|---|---|---|
+| Load as a panel | `manifest.json` v5, `host.app = "premierepro"`, `minVersion 25.6.0` | Documented | yes |
+| Active project / sequence | `Project.getActiveProject()`, `project.getActiveSequence()` | Documented | yes |
+| Read timeline selection | `sequence.getSelection()` → `TrackItemSelection.getTrackItems()` | Documented | yes |
+| Clip source path | `ClipProjectItem.cast(projectItem).getMediaFilePath()` | Documented | yes |
+| Source in/out vs timeline in/out | `getInPoint/getOutPoint` vs `getStartTime/getEndTime` (`TickTime.seconds`) | Documented; **whether in/out points are relative to media start or timecode needs verifying** | yes |
+| Speed / reverse / disabled | `getSpeed()`, `isSpeedReversed()`, `isDisabled()` | Documented | yes (flags) |
+| Nested sequence / offline | `ClipProjectItem.isSequence()`, `isOffline()` | Documented | yes (flags) |
+| Existing source Input LUT | `ClipProjectItem.getInputLUTID()` | Documented | yes (flag) |
+| Existing effects on a clip | `getComponentChain()`, `getComponentCount/AtIndex`, `getMatchName()` | Documented | yes (flags Lumetri) |
+| Frame rate / timebase | `getSettings().getVideoFrameRate().value`, `getTimebase()` | Documented | yes |
+| Multicam detection | — | **Not found**: multicam clips are not detected automatically | no |
+| Clip colour-space override (Interpret Footage) | — | **Not found**: the manifest cannot report it | no |
+| Lumetri available | `VideoFilterFactory.getMatchNames()` contains a Lumetri match name | Documented factory; the **Lumetri match name is not documented** (`AE.ADBE Lumetri` is an assumption that is checked at runtime) | capability test only |
+| Add an effect | `VideoFilterFactory.createComponent()` + `chain.createAppendComponentAction()` inside `project.executeTransaction()` | Documented | **no** (MVP is non-destructive) |
+| Set effect parameters | `ComponentParam.createKeyframe()` + `createSetValueAction()` | Documented generically; **Lumetri parameter indices/meanings are not documented** | read-only inspector only |
+| Assign a LUT file to Lumetri (Input LUT / Look) | — | **Unsupported**: no documented API | no → guided manual application |
+| Set a media Input LUT | `ClipProjectItem.createSetInputLUTIDAction(id)` | Documented, but **no documented way to get an ID for a .cube file** | no |
+| Undo transactions | `project.executeTransaction(cb, undoString)`, `lockedAccess` | Documented | not needed yet |
+| Export a rendered frame | `Exporter.exportSequenceFrame(seq, time, name, folder, w, h)` | Documented | not yet (see the next steps in the README) |
+| Export the sequence | `EncoderManager.getManager().exportSequence(...)` | Documented | no |
+| Markers / XMP metadata | `Markers.getMarkers()`, `Metadata.*` | Documented | no |
+| `http://localhost` from the panel | manifest `network.domains` | Documented for domains; **Adobe notes macOS may block plain `http://`** | yes → TLS option on the service |
+| Secret storage | `uxp.storage.secureStorage` | Generic UXP API; **availability in Premiere is checked at runtime** | yes (API key, service token) |
+| QE DOM / UI automation | — | Not used (undocumented; would need your approval) | no |
+
+## Consequences for the MVP
+
+1. The panel only **reads**. It never edits the sequence, so there is nothing to revert.
+2. LUTs are applied **by hand** in Lumetri, with copy-path buttons and instructions in the panel.
+3. Analysis grades **clean source media** decoded by FFmpeg. Effects, Lumetri, Interpret Footage overrides
+   and input LUTs already applied in Premiere are not seen, so the panel flags clips that have them.
+4. An automatic-apply path would need either a documented Lumetri LUT API in a future Premiere version,
+   or a native C++ effect plug-in that reads `grade.json` (a much bigger project).
