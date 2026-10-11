@@ -70,6 +70,8 @@ Outputs per shot: `samples/`, `previews/`, `measurements.json`, `grade.json`, `m
 
 Claude from the CLI (`--ai`): `off` (default) · `prepare` (writes the request for offline review) ·
 `api` (uses `ANTHROPIC_API_KEY`; uploads small stills; paid) · `file` · `mock` (deterministic, offline).
+Copy a stylised reference's grade instead of only matching: `--look-match --look-strength 0.75`
+(see [colour pipeline](docs/COLOUR_PIPELINE.md#reference-look-mode---look-match-panel-step-2--reference-look)).
 Other flags: `--assume-rec709`, `--split-scenes`, `--lut-size 65`, `--neutral-target neutral`.
 
 Try it with synthetic footage:

@@ -221,7 +221,12 @@ async function fakeFetch(url, init = {}) {
   await click(lutTag);
   console.log("after include:", [...document.querySelectorAll(".clip")].map((c) => c.querySelector(".tag").textContent).join(", "));
   await click("claude-row");
-  await click(document.querySelector('[data-look="ai"]'));
+  if (process.env.LOOK_MODE) {
+    await click(document.querySelector('.seg-item[data-mode="look"]'));
+    await click(document.querySelector('[data-strength="1"]'));
+  } else {
+    await click(document.querySelector('[data-look="ai"]'));
+  }
   console.log("cta:", text("cta-main"), "|", text("cta-sub"));
 
   // 4. Analyse.
@@ -232,6 +237,13 @@ async function fakeFetch(url, init = {}) {
   console.log("hero:", text("hero-num"), text("hero-big"), "|", text("hero-sub"));
   if (text("stat-ok") === "0" && text("stat-review") === "0") done(1, "nothing matched");
   console.log("stats: matched", text("stat-ok"), "review", text("stat-review"), "skipped", text("stat-skip"));
+  if (process.env.LOOK_MODE) {
+    const req = JSON.parse(nfs.readFileSync(path.join(path.dirname(path.dirname(document.querySelector("[data-copy]").dataset.copy)), "request.json"), "utf8"));
+    console.log("look options:", JSON.stringify({ look: req.options.look, look_match: req.options.look_match, look_strength: req.options.look_strength }));
+    const chips = [...document.querySelectorAll(".chip")].map((c) => c.textContent).filter((t) => /Ref look/.test(t));
+    console.log("ref-look chips:", chips.join(" | "));
+    if (!req.options.look_match || req.options.look_strength !== 1 || !chips.length) done(1, "look mode not applied");
+  }
   console.log("shot cards:", document.querySelectorAll("#shot-cards .card").length, "| ev rows:", document.querySelectorAll("#ev-rows .ev-row").length);
   console.log("claude calls:", claudeCalls.length, "images:", claudeCalls[0] && claudeCalls[0].messages[0].content.filter((c) => c.type === "image").length);
 

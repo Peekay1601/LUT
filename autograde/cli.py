@@ -37,6 +37,9 @@ def _build_parser() -> argparse.ArgumentParser:
     a.add_argument("--neutral-target", choices=["reference", "neutral"], default="reference",
                    help="match neutrals to the reference's neutrals, or to true grey")
     a.add_argument("--max-samples", dest="samples_cap", type=int, default=12)
+    a.add_argument("--look-match", action="store_true",
+                   help="also transfer the reference's look: tone curve, shadow/mid/highlight colour, saturation")
+    a.add_argument("--look-strength", type=float, default=0.75, help="0..1 strength for --look-match")
     a.add_argument("--cache-dir", default=str(Path.home() / ".cache" / "consistent-grade"),
                    help="decoded-frame cache ('' to disable)")
     a.add_argument("--json", action="store_true", help="print project.json summary to stdout")
@@ -71,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         reference=args.reference, look=args.look, ai_mode=args.ai_mode, ai_guidance=args.ai_guidance,
         creative_brief=args.creative_brief, lut_size=args.lut_size, assume_rec709=args.assume_rec709,
         split_scenes=args.split_scenes, neutral_target=args.neutral_target, samples_cap=args.samples_cap,
-        cache_dir=args.cache_dir or None,
+        cache_dir=args.cache_dir or None, look_match=args.look_match, look_strength=args.look_strength,
     )
     if args.ai_model:
         opts.ai_model = args.ai_model

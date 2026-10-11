@@ -59,11 +59,29 @@
       <div class="card-head">
         <div>
           <div class="eyebrow">STEP 2</div>
-          <div class="card-title">Look</div>
+          <div class="card-title">What to match</div>
         </div>
-        <div class="hint" id="look-hint">Applied after matching</div>
       </div>
-      <div class="looks" id="looks"></div>
+      <div class="seg" id="mode-seg">
+        <div class="seg-item" data-mode="consistency"><div class="seg-title">Consistency</div><div class="seg-desc">Gentle fixes so shots belong together</div></div>
+        <div class="seg-item" data-mode="look"><div class="seg-title">Reference look</div><div class="seg-desc">Copy the reference's grade</div></div>
+      </div>
+      <div id="look-strength" class="hidden">
+        <div class="row" style="margin-top: 10px;">
+          <div class="hint">Strength</div>
+          <div class="spacer"></div>
+          <div class="chips-row" id="strength-chips"></div>
+        </div>
+        <div class="hint" style="margin-top: 6px;">Matches tones (blacks, contrast), the colour of shadows, midtones and highlights, and saturation to your reference — best with a reference still or graded shot.</div>
+      </div>
+      <div id="look-presets">
+        <div class="row" style="margin: 12px 0 8px 0;">
+          <div class="eyebrow">CREATIVE LOOK</div>
+          <div class="spacer"></div>
+          <div class="hint" id="look-hint">Applied after matching</div>
+        </div>
+        <div class="looks" id="looks"></div>
+      </div>
     </div>
 
     <div class="card">

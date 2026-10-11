@@ -82,3 +82,20 @@ Steps 2–5 are the **per-shot match** (`match.cube`). Steps 6–9 are the **sha
 * Or use `shot_XXX/match.cube` per clip plus `look/look.cube` once on an adjustment layer.
 * **Never** put it in Basic Correction › Input LUT on top of another input transform, and never on
   untreated log footage.
+
+## Reference look mode (`--look-match`, panel: Step 2 › Reference look)
+
+Consistency matching is deliberately gentle. When you want a shot to *take on* a stylised reference
+(crushed blacks, cool shadows / warm highlights, muted colour) the engine adds a per-shot
+**look transfer** after the match (`autograde/transfer.py`), stored in `grade.json` as `look_transfer`
+and baked into `grade.cube`:
+
+| Part | How | Bounds |
+|---|---|---|
+| Tone curve | luma quantiles of the (matched) shot mapped onto the reference's; applied additively (rgb + curve(y) − y) | slope 0.35–2.8, smoothed, monotonic |
+| Zone colour | mean chroma of shadows / midtones / highlights moved to the reference's (luma-neutral offsets, smooth zone weights) | ±0.12 per channel; skipped for zones either image barely has |
+| Saturation | ratio of median chroma | ×0.55–1.6 |
+
+`strength` (0.5 / 0.75 / 1.0 in the panel) scales all three. It's still one fixed transform per shot
+computed from all samples, so it can't flicker. The creative look presets are ignored in this mode (the
+reference is the look). Lumetri sliders can't represent it, so for this mode apply the LUT itself.

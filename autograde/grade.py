@@ -48,6 +48,8 @@ class ShotGrade:
     confidence: float = 1.0
     needs_review: bool = False
     reasons: list[str] = field(default_factory=list)
+    # Optional reference look transfer (see transfer.py), applied after the match.
+    look_transfer: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -144,6 +146,10 @@ def apply_grade(sig: np.ndarray, grade: ShotGrade | None, look: Look | None = No
         x = _shoulder(x, float(colour.oetf_709(np.array(gains.max()))))
         x = _contrast(x, grade.contrast, grade.contrast_pivot)
         x = _saturation(x, grade.saturation)
+        if grade.look_transfer:
+            from .transfer import LookTransfer, apply_transfer
+
+            x = apply_transfer(np.clip(x, 0.0, 1.0), LookTransfer.from_dict(grade.look_transfer))
     if look is not None and look.name != "none":
         if look.warmth or look.tint:
             wg = _warmth_gains(look.warmth, look.tint).astype(np.float32)

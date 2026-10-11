@@ -42,6 +42,8 @@ const state = {
   referenceImage: null,   // path to a still
   included: {},           // shot_id -> true when the user overrides a "soft" flag
   assumeRec709: true,     // treat files without colour tags as Rec.709
+  mode: "consistency",    // or "look": transfer the reference's look
+  strength: 0.75,
   look: "none",
   claude: false,
   apiKey: null,
@@ -418,6 +420,19 @@ function renderRefImage() {
   $("ref-image-clear").addEventListener("click", () => { state.referenceImage = null; renderRefImage(); renderClips(); });
 }
 
+const STRENGTHS = [0.5, 0.75, 1.0];
+function renderMode() {
+  document.querySelectorAll(".seg-item").forEach((el) => el.classList.toggle("active", el.dataset.mode === state.mode));
+  show("look-strength", state.mode === "look");
+  show("look-presets", state.mode !== "look");
+  $("strength-chips").innerHTML = STRENGTHS.map((v) => `<div class="pick ${state.strength === v ? "active" : ""}" data-strength="${v}">${Math.round(v * 100)}%</div>`).join("");
+  document.querySelectorAll("[data-strength]").forEach((el) => el.addEventListener("click", () => {
+    state.strength = Number(el.dataset.strength);
+    renderMode();
+    renderCta();
+  }));
+}
+
 function renderLooks() {
   const tile = (l) => {
     const disabled = l.id === "ai" && !state.claude;
@@ -443,7 +458,7 @@ function renderCta() {
   const ready = n > 0 && !!state.engine && !state.running;
   $("btn-analyze").className = `cta ${ready ? "" : "is-disabled"}`;
   $("cta-main").textContent = n ? `Match ${n} shot${n === 1 ? "" : "s"}` : "Match shots";
-  const look = LOOKS.find((l) => l.id === state.look);
+  const look = state.mode === "look" ? { name: `Reference look ${Math.round(state.strength * 100)}%` } : LOOKS.find((l) => l.id === state.look);
   const ref = state.referenceImage ? basename(state.referenceImage) : state.reference ? state.reference.replace("shot_", "Shot ") : "auto reference";
   $("cta-sub").textContent = !m ? "Read your selection to begin"
     : !state.engine ? "Start the engine in Setup first"
@@ -496,7 +511,9 @@ async function analyze() {
     },
     options: {
       reference: state.referenceImage || state.reference || null,
-      look: state.look,
+      look: state.mode === "look" ? "none" : state.look,
+      look_match: state.mode === "look",
+      look_strength: state.strength,
       ai_mode: state.claude ? "panel" : "off",
       assume_rec709: state.assumeRec709,
     },
@@ -647,6 +664,7 @@ function shotCard(s) {
         <div class="chip">Contrast <b>${g.contrast.toFixed(2)}</b></div>
         <div class="chip">Sat <b>${g.saturation.toFixed(2)}</b></div>
         <div class="chip">Confidence <b>${Math.round(100 * g.confidence)}%</b></div>
+        ${g.look_transfer ? `<div class="chip">Ref look <b>${Math.round(100 * g.look_transfer.strength)}%</b> · sat <b>×${g.look_transfer.saturation.toFixed(2)}</b></div>` : ""}
       </div>
       ${why.length ? `<div class="why">${why.map(esc).join("<br>")}</div>` : ""}
       ${ai ? `<div class="ai-note"><b>Claude:</b> ${esc([ai.exposure, ai.colour_cast, ai.lighting_intent].filter(Boolean).join(" · "))}</div>` : ""}
@@ -949,6 +967,9 @@ async function applyShots(shots) {
   const unverified = good.filter((r) => !r.verified).length;
   let msg = good.length ? `Applied ${good.length} shot${good.length === 1 ? "" : "s"}: ` +
     good.map((r) => `${esc(r.shot.name)} → ${METHOD_LABEL[r.method]}`).join("; ") + "." : "";
+  if (approx && state.summary.shots.some((x) => x.grade && x.grade.look_transfer)) {
+    msg += " Note: sliders can't reproduce the reference look (tone curve and split toning) — for that, use Copy LUT on each shot.";
+  }
   if (approx) {
     msg += " Slider grades approximate the match — fine-tune in Lumetri › Basic Correction if needed.";
     if (state.summary.look && state.summary.look !== "none") msg += " The shared look isn't in the sliders: put <b>look.cube</b> (Copy look-only LUT) on an adjustment layer.";
@@ -1068,6 +1089,14 @@ $("claude-row").addEventListener("click", () => {
   renderLooks();
 });
 $("btn-analyze").addEventListener("click", guard(analyze));
+document.querySelectorAll(".seg-item").forEach((el) => el.addEventListener("click", () => {
+  state.mode = el.dataset.mode;
+  if (state.mode === "look" && !state.reference && !state.referenceImage && state.manifest) {
+    banner("Reference look works best when you pick a reference: click a shot, or use “Match to a still…”.", "warn");
+  }
+  renderMode();
+  renderCta();
+}));
 $("rec709-row").addEventListener("click", () => {
   state.assumeRec709 = !state.assumeRec709;
   try { localStorage.setItem("assumeRec709", state.assumeRec709 ? "1" : "0"); } catch (e) { /* optional */ }
@@ -1107,6 +1136,7 @@ $("btn-log").addEventListener("click", () => {
   try { if (localStorage.getItem("assumeRec709") === "0") state.assumeRec709 = false; } catch (e) { /* optional */ }
   renderClips();
   renderLooks();
+  renderMode();
   renderResults();
   await loadKey();
   await pollEngine();

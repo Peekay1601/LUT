@@ -45,6 +45,8 @@ class Options:
     assume_rec709: bool = False
     split_scenes: bool = False
     neutral_target: str = "reference"
+    look_match: bool = False      # also transfer the reference's look (tone curve, split tone, saturation)
+    look_strength: float = 0.75   # 0..1, how far towards the reference's look
     samples_cap: int = 12
     analysis_width: int = 960
     cache_dir: str | None = None  # decoded-frame cache; None disables
@@ -180,7 +182,7 @@ def run(shots: list[Shot], out: Path, opts: Options, log: Callable[[str], None] 
         raise RuntimeError("no shots could be analysed; see warnings in project.json")
 
     # ---------------- reference ----------------
-    ref_desc, ref_meas, ref_shot_id, ref_preview = _resolve_reference(opts.reference, analysed, samples_by_shot, out)
+    ref_desc, ref_meas, ref_shot_id, ref_preview, ref_signals = _resolve_reference(opts.reference, analysed, samples_by_shot, out)
     for r in analysed:
         r["vs_reference"] = measure.compare(ref_meas, r["measurements"])
 
@@ -213,6 +215,9 @@ def run(shots: list[Shot], out: Path, opts: Options, log: Callable[[str], None] 
         look_name = (guidance_doc or {}).get("look", {}).get("preset", "none")
     if look_name not in LOOKS:
         raise ValueError(f"unknown look '{look_name}'. Choose from: {', '.join(LOOKS)} or 'ai'")
+    if opts.look_match and look_name != "none":
+        log(f"look-match mode: preset look '{look_name}' ignored (the reference is the look)")
+        look_name = "none"
     look: Look = LOOKS[look_name]
     look_dir = out / "look"
     look_dir.mkdir(exist_ok=True)
@@ -237,6 +242,17 @@ def run(shots: list[Shot], out: Path, opts: Options, log: Callable[[str], None] 
                 sid, r["measurements"], ref_meas, Guidance.from_ai(g_ai) if g_ai else None, opts.neutral_target,
                 remeasure=lambda partial, sigs=sigs: measure.aggregate([measure.measure_frame(apply_grade(x, partial)) for x in sigs]),
             )
+        if opts.look_match and sid != ref_shot_id:
+            from .transfer import derive_transfer, look_distance
+
+            raw = [s.signal for s in samples_by_shot[sid]]
+            matched = [apply_grade(x, grade) for x in raw]
+            lt = derive_transfer(matched, ref_signals, opts.look_strength)
+            grade.look_transfer = lt.to_dict()
+            graded = [apply_grade(x, grade) for x in raw]
+            r["look_distance"] = {"before": look_distance(raw, ref_signals), "after": look_distance(graded, ref_signals)}
+            grade.reasons.append(f"reference look transferred at {round(100 * lt.strength)}% "
+                                 f"(tone curve, shadow/mid/highlight colour, saturation ×{lt.saturation:.2f})")
         if r["warnings"] and any("assumed" in w for w in r["warnings"]):
             grade.reasons.append("colour metadata partly assumed")
         r["grade"] = grade.to_dict()
@@ -316,7 +332,7 @@ def _resolve_reference(ref: str | None, analysed: list[dict], samples_by_shot: d
         if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"} and p.exists():
             sig = load_image_as_signal(p)
             m = measure.aggregate([measure.measure_frame(sig)])
-            return f"image {p.name}", m, None, preview.save_signal(sig, out / "reference.png")
+            return f"image {p.name}", m, None, preview.save_signal(sig, out / "reference.png"), [sig]
         for r in analysed:
             if ref in (r["shot_id"], Path(r["source"]).name, r["name"]):
                 sid = r["shot_id"]
@@ -330,7 +346,8 @@ def _resolve_reference(ref: str | None, analysed: list[dict], samples_by_shot: d
         sid = min(analysed, key=total)["shot_id"]
     r = next(x for x in analysed if x["shot_id"] == sid)
     mid = samples_by_shot[sid][len(samples_by_shot[sid]) // 2]
-    return f"shot {sid} ({r['name']})", r["measurements"], sid, preview.save_signal(mid.signal, out / "reference.png")
+    return (f"shot {sid} ({r['name']})", r["measurements"], sid, preview.save_signal(mid.signal, out / "reference.png"),
+            [s.signal for s in samples_by_shot[sid]])
 
 
 def _consistency(analysed: list[dict]) -> dict:
